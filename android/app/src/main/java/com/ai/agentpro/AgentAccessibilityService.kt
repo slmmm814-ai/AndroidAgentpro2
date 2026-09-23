@@ -1143,39 +1143,9 @@ class AgentAccessibilityService : AccessibilityService() {
             )
             Log.i(TAG, "clipboard written for paste id=$operationId")
 
-            val path = Path().apply {
-                moveTo(cx, cy)
+            longPress(cx, cy, LONG_PRESS_DURATION_MS) {
+                Log.i(TAG, "paste long-press dispatched cfid=$operationId")
             }
-
-            val gesture = GestureDescription.Builder()
-                .addStroke(
-                    GestureDescription.StrokeDescription(
-                        path,
-                        0L,
-                        LONG_PRESS_DURATION_MS
-                    )
-                )
-                .build()
-
-            dispatchGesture(
-                gesture,
-                object : GestureResultCallback() {
-                    override fun onCompleted(
-                        completedGesture: GestureDescription?
-                    ) {
-                        Log.i(TAG, "paste long-press dispatched cfid=$operationId")
-                    }
-
-                    override fun onCancelled(
-                        cancelledGesture: GestureDescription?
-                    ) {
-                        Log.w(
-                            TAG,
-                            "paste long-press cancelled cfid=$operationId"
-                        )
-                    }
-                }
-            )
 
             SystemClock.sleep(1_000L)
 
@@ -1204,20 +1174,19 @@ class AgentAccessibilityService : AccessibilityService() {
                     "input_text completed id=$operationId " +
                         "method=clipboard_paste"
                 )
-                GestureResult(
+                return GestureResult(
                     true,
                     null,
                     "method=clipboard_paste",
                     operationId
                 )
-            } else {
-                GestureResult(
-                    false,
-                    "INPUT_PASTE_FAILED",
-                    "Paste action performed but text was not applied",
-                    operationId
-                )
             }
+            return GestureResult(
+                false,
+                "INPUT_PASTE_FAILED",
+                "Paste action performed but text was not applied",
+                operationId
+            )
         } catch (securityException: SecurityException) {
             Log.e(TAG, "clipboard paste security failure", securityException)
             GestureResult(
