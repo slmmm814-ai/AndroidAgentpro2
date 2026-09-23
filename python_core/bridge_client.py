@@ -17,8 +17,13 @@ HOST = "127.0.0.1"
 PORT = 8070
 PATH = "/v1/command"
 
-CONNECT_TIMEOUT_SECONDS = 3.0
-READ_TIMEOUT_SECONDS = 10.0
+CONNECT_TIMEOUT_SECONDS = 5.0
+
+# The Bridge guarantees a response within ~6s for gesture/input commands
+# (GESTURE_TIMEOUT_MS=5s + routing overhead). Keep the client read timeout
+# comfortably above that so slow devices surface a real remote error code
+# instead of a misleading local socket timeout.
+READ_TIMEOUT_SECONDS = 20.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_REQUEST_BYTES = 1024 * 1024
 

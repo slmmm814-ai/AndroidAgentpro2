@@ -8,9 +8,11 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 class AgentAccessibilityService : AccessibilityService() {
@@ -22,6 +24,12 @@ class AgentAccessibilityService : AccessibilityService() {
         private const val MAX_TREE_DEPTH = 80
 
         private const val MAX_TREE_NODES = 2_000
+
+        private const val NODE_OP_TIMEOUT_MS = 4_000L
+
+        private const val DUMP_RETRY_WINDOW_MS = 1_500L
+
+        private const val DUMP_RETRY_PAUSE_MS = 180L
 
         @Volatile
         private var instance: AgentAccessibilityService? = null
@@ -93,48 +101,111 @@ class AgentAccessibilityService : AccessibilityService() {
             )
         }
 
-        return try {
-            val root = rootInActiveWindow
+        val deadline =
+            SystemClock.uptimeMillis() + DUMP_RETRY_WINDOW_MS
 
-            if (root == null) {
-                UiDumpResult(
+        while (SystemClock.uptimeMillis() < deadline) {
+            try {
+                val liveRoot = rootInActiveWindow
+
+                if (liveRoot != null) {
+                    return buildDumpResult(liveRoot)
+                }
+            } catch (securityException: SecurityException) {
+                Log.e(
+                    TAG,
+                    "Security error during UI dump",
+                    securityException
+                )
+
+                return UiDumpResult(
                     success = false,
-                    errorCode = "UI_ROOT_UNAVAILABLE",
-                    errorMessage = "Active window UI root is unavailable",
+                    errorCode = "UI_DUMP_SECURITY_ERROR",
+                    errorMessage = securityException.message
+                        ?: "Security error during UI dump",
                     root = null
                 )
-            } else {
-                val budget = NodeBudget(MAX_TREE_NODES)
-                val rootNode = nodeToData(root, 0, 0, budget)
-                UiDumpResult(
-                    success = true,
-                    errorCode = null,
-                    errorMessage = null,
-                    root = rootNode,
-                    truncated = budget.exhausted
+            } catch (exception: Exception) {
+                Log.e(TAG, "UI dump failed", exception)
+
+                return UiDumpResult(
+                    success = false,
+                    errorCode = "UI_DUMP_FAILED",
+                    errorMessage = exception.message
+                        ?: "Unexpected UI dump failure",
+                    root = null
                 )
             }
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "Security error during UI dump", securityException)
 
-            UiDumpResult(
-                success = false,
-                errorCode = "UI_DUMP_SECURITY_ERROR",
-                errorMessage = securityException.message
-                    ?: "Security error during UI dump",
-                root = null
-            )
-        } catch (exception: Exception) {
-            Log.e(TAG, "UI dump failed", exception)
-
-            UiDumpResult(
-                success = false,
-                errorCode = "UI_DUMP_FAILED",
-                errorMessage = exception.message
-                    ?: "Unexpected UI dump failure",
-                root = null
-            )
+            SystemClock.sleep(DUMP_RETRY_PAUSE_MS)
         }
+
+        try {
+            val fallbackRoot = findVisibleWindowRoot()
+
+            if (fallbackRoot != null) {
+                Log.w(TAG, "UI dump fell back to a visible window root")
+                return buildDumpResult(fallbackRoot)
+            }
+        } catch (exception: Exception) {
+            Log.e(TAG, "UI dump fallback failed", exception)
+        }
+
+        return UiDumpResult(
+            success = false,
+            errorCode = "UI_ROOT_UNAVAILABLE",
+            errorMessage = "Active window UI root is unavailable",
+            root = null
+        )
+    }
+
+    private fun buildDumpResult(root: AccessibilityNodeInfo): UiDumpResult {
+        val budget = NodeBudget(MAX_TREE_NODES)
+        val rootNode = nodeToData(root, 0, 0, budget)
+        return UiDumpResult(
+            success = true,
+            errorCode = null,
+            errorMessage = null,
+            root = rootNode,
+            truncated = budget.exhausted
+        )
+    }
+
+    private fun findVisibleWindowRoot(): AccessibilityNodeInfo? {
+        val allWindows = try {
+            windows
+        } catch (exception: Exception) {
+            Log.w(TAG, "Unable to list accessibility windows", exception)
+            emptyList<AccessibilityWindowInfo>()
+        }
+
+        val ordered = allWindows.sortedWith(
+            compareByDescending<AccessibilityWindowInfo> {
+                if (it.isActive) 1 else 0
+            }.thenByDescending {
+                if (it.isFocused) 1 else 0
+            }
+        )
+
+        for (window in ordered) {
+            if (window.type ==
+                AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+            ) {
+                continue
+            }
+
+            val root = try {
+                window.root
+            } catch (exception: Exception) {
+                null
+            } ?: continue
+
+            if (root.isVisibleToUser) {
+                return root
+            }
+        }
+
+        return null
     }
 
     fun tap(
@@ -591,81 +662,81 @@ class AgentAccessibilityService : AccessibilityService() {
             return
         }
 
+        if (text.isEmpty()) {
+            callback(
+                GestureResult(
+                    false,
+                    "INPUT_EMPTY_TEXT",
+                    "input_text requires a non-empty text",
+                    null
+                )
+            )
+            return
+        }
+
         val operationId = operationCounter.incrementAndGet()
 
-        try {
-            val root = rootInActiveWindow
-            val target = findEditableTarget(root)
+        val result = runNodeOperationOnMain(
+            deadlineMs = NODE_OP_TIMEOUT_MS,
+            operationName = "input_text",
+            onTimeout = GestureResult(
+                false,
+                "INPUT_TIMEOUT",
+                "Input did not finish in time",
+                operationId
+            ),
+            nodeOp = {
+                val root = rootInActiveWindow
+                val target = findEditableTarget(root)
 
-            if (target == null) {
-                callback(
+                if (target == null) {
                     GestureResult(
                         false,
                         "INPUT_NO_FOCUS",
-                        "No focused editable field to input text into",
+                        "No editable field available to receive text",
                         operationId
                     )
-                )
-                return
-            }
+                } else {
+                    ensureEditableFocused(target)
 
-            val args = Bundle().apply {
-                putCharSequence(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                    text
-                )
-            }
+                    val args = Bundle().apply {
+                        putCharSequence(
+                            AccessibilityNodeInfo
+                                .ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            text
+                        )
+                    }
 
-            val performed = target.performAction(
-                AccessibilityNodeInfo.ACTION_SET_TEXT,
-                args
-            )
-
-            if (performed) {
-                Log.i(
-                    TAG,
-                    "input_text completed id=$operationId len=${text.length}"
-                )
-                callback(
-                    GestureResult(
-                        true,
-                        null,
-                        null,
-                        operationId
+                    val performed = target.performAction(
+                        AccessibilityNodeInfo.ACTION_SET_TEXT,
+                        args
                     )
-                )
-            } else {
-                callback(
-                    GestureResult(
-                        false,
-                        "INPUT_SET_TEXT_REJECTED",
-                        "Field rejected ACTION_SET_TEXT",
-                        operationId
-                    )
-                )
+
+                    if (performed) {
+                        Log.i(
+                            TAG,
+                            "input_text completed id=$operationId " +
+                                "len=${text.length}"
+                        )
+                        GestureResult(
+                            true,
+                            null,
+                            null,
+                            operationId
+                        )
+                    } else {
+                        GestureResult(
+                            false,
+                            "INPUT_SET_TEXT_REJECTED",
+                            "Field rejected ACTION_SET_TEXT",
+                            operationId
+                        )
+                    }
+                }
             }
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "input_text security failure", securityException)
-            callback(
-                GestureResult(
-                    false,
-                    "INPUT_SECURITY_ERROR",
-                    securityException.message ?: "Security failure",
-                    operationId
-                )
-            )
-        } catch (exception: Exception) {
-            Log.e(TAG, "input_text failure", exception)
-            callback(
-                GestureResult(
-                    false,
-                    "INPUT_FAILED",
-                    exception.message
-                        ?: "Unexpected input failure",
-                    operationId
-                )
-            )
-        }
+        )
+
+        callback(result)
     }
 
     fun clearText(
@@ -685,79 +756,66 @@ class AgentAccessibilityService : AccessibilityService() {
 
         val operationId = operationCounter.incrementAndGet()
 
-        try {
-            val root = rootInActiveWindow
-            val target = findEditableTarget(root)
+        val result = runNodeOperationOnMain(
+            deadlineMs = NODE_OP_TIMEOUT_MS,
+            operationName = "clear_text",
+            onTimeout = GestureResult(
+                false,
+                "CLEAR_TIMEOUT",
+                "Clear did not finish in time",
+                operationId
+            ),
+            nodeOp = {
+                val root = rootInActiveWindow
+                val target = findEditableTarget(root)
 
-            if (target == null) {
-                callback(
+                if (target == null) {
                     GestureResult(
                         false,
                         "CLEAR_NO_FOCUS",
-                        "No focused editable field to clear",
+                        "No editable field available to clear",
                         operationId
                     )
-                )
-                return
-            }
+                } else {
+                    ensureEditableFocused(target)
 
-            val args = Bundle().apply {
-                putCharSequence(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                    ""
-                )
-            }
+                    val args = Bundle().apply {
+                        putCharSequence(
+                            AccessibilityNodeInfo
+                                .ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            ""
+                        )
+                    }
 
-            val performed = target.performAction(
-                AccessibilityNodeInfo.ACTION_SET_TEXT,
-                args
-            )
-
-            if (performed) {
-                Log.i(
-                    TAG,
-                    "clear_text completed id=$operationId"
-                )
-                callback(
-                    GestureResult(
-                        true,
-                        null,
-                        null,
-                        operationId
+                    val performed = target.performAction(
+                        AccessibilityNodeInfo.ACTION_SET_TEXT,
+                        args
                     )
-                )
-            } else {
-                callback(
-                    GestureResult(
-                        false,
-                        "CLEAR_SET_TEXT_REJECTED",
-                        "Field rejected ACTION_SET_TEXT",
-                        operationId
-                    )
-                )
+
+                    if (performed) {
+                        Log.i(
+                            TAG,
+                            "clear_text completed id=$operationId"
+                        )
+                        GestureResult(
+                            true,
+                            null,
+                            null,
+                            operationId
+                        )
+                    } else {
+                        GestureResult(
+                            false,
+                            "CLEAR_SET_TEXT_REJECTED",
+                            "Field rejected ACTION_SET_TEXT",
+                            operationId
+                        )
+                    }
+                }
             }
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "clear_text security failure", securityException)
-            callback(
-                GestureResult(
-                    false,
-                    "CLEAR_SECURITY_ERROR",
-                    securityException.message ?: "Security failure",
-                    operationId
-                )
-            )
-        } catch (exception: Exception) {
-            Log.e(TAG, "clear_text failure", exception)
-            callback(
-                GestureResult(
-                    false,
-                    "CLEAR_FAILED",
-                    exception.message
-                        ?: "Unexpected clear failure",
-                    operationId
-                )
-            )
-        }
+        )
+
+        callback(result)
     }
 
     fun eraseText(
@@ -777,110 +835,104 @@ class AgentAccessibilityService : AccessibilityService() {
 
         val operationId = operationCounter.incrementAndGet()
 
-        try {
-            val root = rootInActiveWindow
-            val target = findEditableTarget(root)
+        val result = runNodeOperationOnMain(
+            deadlineMs = NODE_OP_TIMEOUT_MS,
+            operationName = "erase_text",
+            onTimeout = GestureResult(
+                false,
+                "ERASE_TIMEOUT",
+                "Erase did not finish in time",
+                operationId
+            ),
+            nodeOp = {
+                val root = rootInActiveWindow
+                val target = findEditableTarget(root)
 
-            if (target == null) {
-                callback(
+                if (target == null) {
                     GestureResult(
                         false,
                         "ERASE_NO_FOCUS",
-                        "No focused editable field to erase",
+                        "No editable field available to erase",
                         operationId
                     )
-                )
-                return
-            }
+                } else {
+                    ensureEditableFocused(target)
 
-            var erased = false
-            val setSelectionAttempted = target.performAction(
-                AccessibilityNodeInfo.ACTION_SET_SELECTION,
-                Bundle().apply {
-                    putInt(
-                        AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,
-                        0
-                    )
-                    putInt(
-                        AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
-                        Integer.MAX_VALUE
-                    )
-                }
-            )
+                    var erased = false
 
-            if (setSelectionAttempted) {
-                erasing@ for (attempt in 0 until 3) {
-                    val cutPerformed = target.performAction(
-                        AccessibilityNodeInfo.ACTION_CUT
+                    val setSelectionAttempted = target.performAction(
+                        AccessibilityNodeInfo.ACTION_SET_SELECTION,
+                        Bundle().apply {
+                            putInt(
+                                AccessibilityNodeInfo
+                                    .ACTION_ARGUMENT_SELECTION_START_INT,
+                                0
+                            )
+                            putInt(
+                                AccessibilityNodeInfo
+                                    .ACTION_ARGUMENT_SELECTION_END_INT,
+                                Integer.MAX_VALUE
+                            )
+                        }
                     )
-                    if (cutPerformed) {
-                        erased = true
-                        break@erasing
+
+                    if (setSelectionAttempted) {
+                        for (attempt in 0 until 3) {
+                            val cutPerformed = target.performAction(
+                                AccessibilityNodeInfo.ACTION_CUT
+                            )
+                            if (cutPerformed) {
+                                erased = true
+                                break
+                            }
+                            val text =
+                                target.text?.toString() ?: ""
+                            if (text.isEmpty()) {
+                                erased = true
+                                break
+                            }
+                            SystemClock.sleep(80L)
+                        }
                     }
-                    val text = target.text?.toString() ?: ""
-                    if (text.isEmpty()) {
-                        erased = true
-                        break@erasing
+
+                    if (!erased) {
+                        val args = Bundle().apply {
+                            putCharSequence(
+                                AccessibilityNodeInfo
+                                    .ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                ""
+                            )
+                        }
+                        erased = target.performAction(
+                            AccessibilityNodeInfo.ACTION_SET_TEXT,
+                            args
+                        )
                     }
-                    Thread.sleep(80)
+
+                    if (erased) {
+                        Log.i(
+                            TAG,
+                            "erase_text completed id=$operationId"
+                        )
+                        GestureResult(
+                            true,
+                            null,
+                            null,
+                            operationId
+                        )
+                    } else {
+                        GestureResult(
+                            false,
+                            "ERASE_REJECTED",
+                            "Field rejected erase actions",
+                            operationId
+                        )
+                    }
                 }
             }
+        )
 
-            if (!erased) {
-                val args = Bundle().apply {
-                    putCharSequence(
-                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                        ""
-                    )
-                }
-                erased = target.performAction(
-                    AccessibilityNodeInfo.ACTION_SET_TEXT,
-                    args
-                )
-            }
-
-            if (erased) {
-                Log.i(TAG, "erase_text completed id=$operationId")
-                callback(
-                    GestureResult(
-                        true,
-                        null,
-                        null,
-                        operationId
-                    )
-                )
-            } else {
-                callback(
-                    GestureResult(
-                        false,
-                        "ERASE_REJECTED",
-                        "Field rejected erase actions",
-                        operationId
-                    )
-                )
-            }
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "erase_text security failure", securityException)
-            callback(
-                GestureResult(
-                    false,
-                    "ERASE_SECURITY_ERROR",
-                    securityException.message ?: "Security failure",
-                    operationId
-                )
-            )
-        } catch (exception: Exception) {
-            Log.e(TAG, "erase_text failure", exception)
-            callback(
-                GestureResult(
-                    false,
-                    "ERASE_FAILED",
-                    exception.message
-                        ?: "Unexpected erase failure",
-                    operationId
-                )
-            )
-        }
+        callback(result)
     }
 
     fun windowInfo(): WindowInfoResult {
@@ -1007,19 +1059,102 @@ class AgentAccessibilityService : AccessibilityService() {
             return null
         }
 
-        // Prefer the currently input-focused node.
-        val focused = root.findFocus(
-            AccessibilityNodeInfo.FOCUS_INPUT
-        ) ?: root.findFocus(
+        // Avoid FOCUS_INPUT lookups off the main thread: on some builds
+        // they can block until an input window materializes. Prefer the
+        // accessibility focus, then any focused editable, then the first
+        // editable field available.
+        val accessibleFocused = root.findFocus(
             AccessibilityNodeInfo.FOCUS_ACCESSIBILITY
         )
 
-        if (focused != null && isEditable(focused)) {
-            return focused
+        if (accessibleFocused != null && isEditable(accessibleFocused)) {
+            return accessibleFocused
         }
 
-        // Fall back to a depth-first search for an editable, focused field.
-        return findEditableFocused(root)
+        val focusedEditable = findEditableFocused(root)
+
+        if (focusedEditable != null) {
+            return focusedEditable
+        }
+
+        return findFirstEditable(root)
+    }
+
+    private fun findFirstEditable(
+        node: AccessibilityNodeInfo
+    ): AccessibilityNodeInfo? {
+        if (isEditable(node)) {
+            return node
+        }
+
+        for (index in 0 until node.childCount) {
+            val child = node.getChild(index) ?: continue
+            val found = findFirstEditable(child)
+            if (found != null) {
+                return found
+            }
+        }
+
+        return null
+    }
+
+    private fun ensureEditableFocused(
+        target: AccessibilityNodeInfo
+    ) {
+        if (!target.isFocused) {
+            target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            SystemClock.sleep(120L)
+        }
+    }
+
+    private fun runNodeOperationOnMain(
+        deadlineMs: Long,
+        operationName: String,
+        onTimeout: GestureResult,
+        nodeOp: () -> GestureResult
+    ): GestureResult {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val cell =
+            java.util.concurrent.atomic.AtomicReference<GestureResult?>(
+                null
+            )
+        val failure =
+            java.util.concurrent.atomic.AtomicReference<Throwable?>(
+                null
+            )
+
+        mainHandler.post {
+            try {
+                cell.set(nodeOp())
+            } catch (securityException: SecurityException) {
+                failure.set(securityException)
+            } catch (exception: Exception) {
+                failure.set(exception)
+            } finally {
+                gate.countDown()
+            }
+        }
+
+        if (!gate.await(deadlineMs, TimeUnit.MILLISECONDS)) {
+            Log.w(
+                TAG,
+                "$operationName timed out waiting for the main thread"
+            )
+            return onTimeout
+        }
+
+        failure.get()?.let {
+            Log.e(TAG, "$operationName failed on the main thread", it)
+            return GestureResult(
+                false,
+                "${operationName.uppercase()}_MAIN_THREAD_ERROR"
+                    .replace(' ', '_'),
+                it.message ?: "Node operation failed",
+                null
+            )
+        }
+
+        return cell.get() ?: onTimeout
     }
 
     private fun findEditableFocused(
