@@ -1189,7 +1189,7 @@ class AgentAccessibilityService : AccessibilityService() {
             )
         } catch (securityException: SecurityException) {
             Log.e(TAG, "clipboard paste security failure", securityException)
-            GestureResult(
+            return GestureResult(
                 false,
                 "INPUT_PASTE_SECURITY_ERROR",
                 securityException.message ?: "Security failure",
@@ -1197,7 +1197,7 @@ class AgentAccessibilityService : AccessibilityService() {
             )
         } catch (exception: Exception) {
             Log.e(TAG, "clipboard paste failure", exception)
-            GestureResult(
+            return GestureResult(
                 false,
                 "INPUT_PASTE_FAILED",
                 exception.message ?: "Unexpected paste failure",
