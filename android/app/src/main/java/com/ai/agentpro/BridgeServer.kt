@@ -346,6 +346,18 @@ class BridgeServer(
                                     accessibility?.isConnected()
                                         == true
                                 )
+                                .put(
+                                    "version_name",
+                                    BuildConfig.VERSION_NAME
+                                )
+                                .put(
+                                    "version_code",
+                                    BuildConfig.VERSION_CODE
+                                )
+                                .put(
+                                    "build_tag",
+                                    BuildConfig.BUILD_TAG
+                                )
                         )
                     )
                 }
@@ -763,111 +775,125 @@ class BridgeServer(
             )
         }
 
-        val accessibility = AgentAccessibilityService.getInstance()
+        return try {
+            val accessibility = AgentAccessibilityService.getInstance()
 
-        if (accessibility == null || !accessibility.isConnected()) {
-            return CommandResponse.failure(
-                503,
-                BridgeProtocol.error(
-                    request.requestId,
-                    "ACCESSIBILITY_NOT_CONNECTED",
-                    "Accessibility service is not connected"
-                )
-            )
-        }
-
-        val executor = commandExecutor
-            ?: return CommandResponse.failure(
-                503,
-                BridgeProtocol.error(
-                    request.requestId,
-                    "COMMAND_EXECUTOR_UNAVAILABLE",
-                    "Bridge command executor is unavailable"
-                )
-            )
-
-        if (executor.isShutdown) {
-            return CommandResponse.failure(
-                503,
-                BridgeProtocol.error(
-                    request.requestId,
-                    "COMMAND_EXECUTOR_STOPPED",
-                    "Bridge command executor is stopped"
-                )
-            )
-        }
-
-        val future: Future<AgentAccessibilityService.GestureResult> =
-            executor.submit<AgentAccessibilityService.GestureResult> {
-                val lock = java.util.concurrent.CountDownLatch(1)
-
-                var result: AgentAccessibilityService.GestureResult? =
-                    null
-
-                accessibility.inputText(text) {
-                    result = it
-                    lock.countDown()
-                }
-
-                if (!lock.await(
-                        GESTURE_TIMEOUT_MS,
-                        TimeUnit.MILLISECONDS
+            if (accessibility == null || !accessibility.isConnected()) {
+                return CommandResponse.failure(
+                    503,
+                    BridgeProtocol.error(
+                        request.requestId,
+                        "ACCESSIBILITY_NOT_CONNECTED",
+                        "Accessibility service is not connected"
                     )
-                ) {
-                    AgentAccessibilityService.GestureResult(
-                        false,
-                        "INPUT_TIMEOUT",
-                        "Input confirmation timed out",
-                        null
-                    )
-                } else {
-                    result
-                        ?: AgentAccessibilityService.GestureResult(
-                            false,
-                            "INPUT_NO_RESULT",
-                            "Input returned no result",
-                            null
-                        )
-                }
+                )
             }
 
-        val result = try {
-            future.get(
-                GESTURE_TIMEOUT_MS + 1_000,
-                TimeUnit.MILLISECONDS
-            )
-        } catch (timeoutException: java.util.concurrent.TimeoutException) {
-            Log.e(
-                TAG,
-                "input_text future timed out",
-                timeoutException
-            )
-            AgentAccessibilityService.GestureResult(
-                false,
-                "INPUT_TIMEOUT",
-                "Input task did not complete in time",
-                null
-            )
-        } catch (executionException: java.util.concurrent.ExecutionException) {
-            Log.e(TAG, "input_text task failed", executionException)
-            AgentAccessibilityService.GestureResult(
-                false,
-                "INPUT_TASK_FAILED",
-                executionException.cause?.message
-                    ?: "Input task failed unexpectedly",
-                null
-            )
+            val executor = commandExecutor
+                ?: return CommandResponse.failure(
+                    503,
+                    BridgeProtocol.error(
+                        request.requestId,
+                        "COMMAND_EXECUTOR_UNAVAILABLE",
+                        "Bridge command executor is unavailable"
+                    )
+                )
+
+            if (executor.isShutdown) {
+                return CommandResponse.failure(
+                    503,
+                    BridgeProtocol.error(
+                        request.requestId,
+                        "COMMAND_EXECUTOR_STOPPED",
+                        "Bridge command executor is stopped"
+                    )
+                )
+            }
+
+            val future: Future<AgentAccessibilityService.GestureResult> =
+                executor.submit<
+                    AgentAccessibilityService.GestureResult
+                > {
+                    val lock = java.util.concurrent.CountDownLatch(1)
+
+                    var result: AgentAccessibilityService.GestureResult? =
+                        null
+
+                    accessibility.inputText(text) {
+                        result = it
+                        lock.countDown()
+                    }
+
+                    if (!lock.await(
+                            GESTURE_TIMEOUT_MS,
+                            TimeUnit.MILLISECONDS
+                        )
+                    ) {
+                        AgentAccessibilityService.GestureResult(
+                            false,
+                            "INPUT_TIMEOUT",
+                            "Input confirmation timed out",
+                            null
+                        )
+                    } else {
+                        result
+                            ?: AgentAccessibilityService.GestureResult(
+                                false,
+                                "INPUT_NO_RESULT",
+                                "Input returned no result",
+                                null
+                            )
+                    }
+                }
+
+            val result = try {
+                future.get(
+                    GESTURE_TIMEOUT_MS + 1_000,
+                    TimeUnit.MILLISECONDS
+                )
+            } catch (timeoutException: java.util.concurrent.TimeoutException) {
+                Log.e(
+                    TAG,
+                    "input_text future timed out",
+                    timeoutException
+                )
+                AgentAccessibilityService.GestureResult(
+                    false,
+                    "INPUT_TIMEOUT",
+                    "Input task did not complete in time",
+                    null
+                )
+            } catch (interruptedException: InterruptedException) {
+                Thread.currentThread().interrupt()
+                AgentAccessibilityService.GestureResult(
+                    false,
+                    "INPUT_INTERRUPTED",
+                    "Input task was interrupted",
+                    null
+                )
+            } catch (executionException: java.util.concurrent.ExecutionException) {
+                Log.e(TAG, "input_text task failed", executionException)
+                AgentAccessibilityService.GestureResult(
+                    false,
+                    "INPUT_TASK_FAILED",
+                    executionException.cause?.message
+                        ?: "Input task failed unexpectedly",
+                    null
+                )
+            }
+
+            gestureResultToResponse(request, result, "INPUT_FAILED")
         } catch (exception: Exception) {
-            Log.e(TAG, "input_text unexpected failure", exception)
-            AgentAccessibilityService.GestureResult(
-                false,
-                "INPUT_UNEXPECTED",
-                exception.message ?: "Unexpected input failure",
-                null
+            Log.e(TAG, "executeInputText failed", exception)
+            CommandResponse.failure(
+                500,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "INPUT_UNEXPECTED",
+                    exception.message ?: "Unexpected input failure"
+                )
             )
         }
-
-        return gestureResultToResponse(request, result, "INPUT_FAILED")
     }
 
     private fun executeSwipe(

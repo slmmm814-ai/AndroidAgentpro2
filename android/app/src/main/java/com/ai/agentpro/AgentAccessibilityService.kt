@@ -2,7 +2,8 @@ package com.ai.agentpro
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.view.accessibility.AccessibilityWindowInfo
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
@@ -12,6 +13,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -716,7 +718,7 @@ class AgentAccessibilityService : AccessibilityService() {
                         Log.i(
                             TAG,
                             "input_text completed id=$operationId " +
-                                "len=${text.length}"
+                                "method=set_text len=${text.length}"
                         )
                         GestureResult(
                             true,
@@ -725,10 +727,15 @@ class AgentAccessibilityService : AccessibilityService() {
                             operationId
                         )
                     } else {
-                        GestureResult(
-                            false,
-                            "INPUT_SET_TEXT_REJECTED",
-                            "Field rejected ACTION_SET_TEXT",
+                        Log.w(
+                            TAG,
+                            "input_text ACTION_SET_TEXT rejected " +
+                                "id=$operationId, falling back to " +
+                                "clipboard paste"
+                        )
+                        clipboardPasteInto(
+                            target,
+                            text,
                             operationId
                         )
                     }
@@ -1106,6 +1113,198 @@ class AgentAccessibilityService : AccessibilityService() {
             SystemClock.sleep(120L)
         }
     }
+
+    /**
+     * Fallback input path: write the text to the clipboard, open the
+     * paste (long-press) menu on the field, and tap the paste action.
+     * This mirrors the input strategy of the earlier builds that typed
+     * reliably on devices where ACTION_SET_TEXT is rejected.
+     *
+     * Must be invoked on the main thread.
+     */
+    private fun clipboardPasteInto(
+        target: AccessibilityNodeInfo,
+        text: String,
+        operationId: Long
+    ): GestureResult {
+        try {
+            val bounds = Rect()
+            target.getBoundsInScreen(bounds)
+
+            val cx = bounds.exactCenterX()
+            val cy = bounds.exactCenterY()
+
+            val clipboard = getSystemService(
+                ClipboardManager::class.java
+            )
+
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("agentpro_input", text)
+            )
+            Log.i(TAG, "clipboard written for paste id=$operationId")
+
+            val path = Path().apply {
+                moveTo(cx, cy)
+            }
+
+            val gesture = GestureDescription.Builder()
+                .addStroke(
+                    GestureDescription.StrokeDescription(
+                        path,
+                        0L,
+                        LONG_PRESS_DURATION_MS
+                    )
+                )
+                .build()
+
+            dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(
+                        completedGesture: GestureDescription?
+                    ) {
+                        Log.i(TAG, "paste long-press dispatched cfid=$operationId")
+                    }
+
+                    override fun onCancelled(
+                        cancelledGesture: GestureDescription?
+                    ) {
+                        Log.w(
+                            TAG,
+                            "paste long-press cancelled cfid=$operationId"
+                        )
+                    }
+                }
+            )
+
+            SystemClock.sleep(1_000L)
+
+            val root = rootInActiveWindow
+            val pasteNode = findPasteNode(root)
+
+            if (pasteNode == null) {
+                Log.w(TAG, "paste menu item not found id=$operationId")
+                return GestureResult(
+                    false,
+                    "INPUT_PASTE_MENU_MISSING",
+                    "Clipboard pasted but no paste action found",
+                    operationId
+                )
+            }
+
+            val clicked = pasteNode.performAction(
+                AccessibilityNodeInfo.ACTION_CLICK
+            )
+
+            SystemClock.sleep(500L)
+
+            if (clicked && fieldShowsText(text)) {
+                Log.i(
+                    TAG,
+                    "input_text completed id=$operationId " +
+                        "method=clipboard_paste"
+                )
+                GestureResult(
+                    true,
+                    null,
+                    "method=clipboard_paste",
+                    operationId
+                )
+            } else {
+                GestureResult(
+                    false,
+                    "INPUT_PASTE_FAILED",
+                    "Paste action performed but text was not applied",
+                    operationId
+                )
+            }
+        } catch (securityException: SecurityException) {
+            Log.e(TAG, "clipboard paste security failure", securityException)
+            GestureResult(
+                false,
+                "INPUT_PASTE_SECURITY_ERROR",
+                securityException.message ?: "Security failure",
+                operationId
+            )
+        } catch (exception: Exception) {
+            Log.e(TAG, "clipboard paste failure", exception)
+            GestureResult(
+                false,
+                "INPUT_PASTE_FAILED",
+                exception.message ?: "Unexpected paste failure",
+                operationId
+            )
+        }
+    }
+
+    private fun findPasteNode(
+        root: AccessibilityNodeInfo?
+    ): AccessibilityNodeInfo? {
+        if (root == null) {
+            return null
+        }
+
+        val candidates = ArrayList<AccessibilityNodeInfo>()
+
+        fun collect(node: AccessibilityNodeInfo) {
+            val text = node.text?.toString().orEmpty()
+            val description =
+                node.contentDescription?.toString().orEmpty()
+            val resourceId =
+                node.viewIdResourceName.orEmpty()
+
+            val label = "$text $description".lowercase()
+            val hasArabicPasteLabel =
+                text.contains("لصق") || description.contains("لصق")
+            val hasEnglishPasteLabel =
+                label.contains("paste") || label.contains("clipboard")
+
+            if (hasArabicPasteLabel ||
+                hasEnglishPasteLabel ||
+                resourceId.contains("paste", ignoreCase = true) ||
+                resourceId.contains("menu", ignoreCase = true)
+            ) {
+                candidates.add(node)
+            }
+
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                collect(child)
+            }
+        }
+
+        collect(root)
+
+        return candidates.maxByOrNull {
+            it.isClickable.toInt()
+        } ?: candidates.firstOrNull()
+    }
+
+    private fun fieldShowsText(expected: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+
+        var lastEditableText: String? = null
+
+        fun scan(node: AccessibilityNodeInfo) {
+            if (node.isEditable ||
+                node.className?.toString()
+                    ?.contains("EditText", ignoreCase = true) == true
+            ) {
+                lastEditableText = node.text?.toString()
+            }
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                scan(child)
+            }
+        }
+
+        scan(root)
+
+        val current = lastEditableText.orEmpty()
+        return expected.isNotEmpty() && current.contains(expected)
+    }
+
+    private fun Boolean.toInt(): Int = if (this) 1 else 0
 
     private fun runNodeOperationOnMain(
         deadlineMs: Long,
