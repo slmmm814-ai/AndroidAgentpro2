@@ -1,0 +1,1792 @@
+package com.ai.agentpro
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.util.Base64
+import android.util.Log
+import androidx.core.content.FileProvider
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.File
+import java.io.IOException
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+class BridgeServer(
+    private val context: Context
+) {
+
+    companion object {
+        private const val TAG = "AndroidAgentPro.Bridge"
+        private const val MAX_HEADER_BYTES = 16 * 1024
+        private const val MAX_BODY_BYTES = 2 * 1024 * 1024
+        private const val SOCKET_TIMEOUT_MS = 10_000
+        private const val GESTURE_TIMEOUT_MS = 5_000L
+        private const val SERVER_BACKLOG = 16
+        private const val WORKER_COUNT = 4
+
+        @Volatile
+        private var instance: BridgeServer? = null
+
+        fun getInstance(context: Context): BridgeServer {
+            return instance ?: synchronized(this) {
+                instance ?: BridgeServer(
+                    context.applicationContext
+                ).also {
+                    instance = it
+                }
+            }
+        }
+    }
+
+    private val running = AtomicBoolean(false)
+
+    @Volatile
+    private var workers: java.util.concurrent.ExecutorService? = null
+
+    @Volatile
+    private var commandExecutor: java.util.concurrent.ExecutorService? = null
+
+    @Volatile
+    private var serverSocket: ServerSocket? = null
+
+    @Volatile
+    private var acceptThread: Thread? = null
+
+    private val authenticationToken: String by lazy {
+        BridgeProtocol.getOrCreateToken(context)
+    }
+
+    fun start() {
+        if (running.get()) {
+            Log.i(TAG, "Bridge server already running")
+            return
+        }
+
+        synchronized(this) {
+            if (running.get()) {
+                return
+            }
+
+            try {
+                val socket = ServerSocket(
+                    BridgeProtocol.SERVER_PORT,
+                    SERVER_BACKLOG,
+                    InetAddress.getByName(
+                        BridgeProtocol.SERVER_HOST
+                    )
+                )
+
+                socket.soTimeout = 1_000
+
+                workers = Executors.newFixedThreadPool(
+                    WORKER_COUNT
+                )
+
+                commandExecutor = Executors.newCachedThreadPool()
+
+                serverSocket = socket
+                running.set(true)
+
+                val thread = Thread(
+                    {
+                        acceptLoop()
+                    },
+                    "AndroidAgentPro-BridgeAccept"
+                )
+
+                thread.isDaemon = true
+                acceptThread = thread
+                thread.start()
+
+                Log.i(
+                    TAG,
+                    "Bridge server started on " +
+                        "${BridgeProtocol.SERVER_HOST}:${BridgeProtocol.SERVER_PORT}"
+                )
+            } catch (exception: Exception) {
+                running.set(false)
+
+                try {
+                    serverSocket?.close()
+                } catch (_: Exception) {
+                }
+
+                serverSocket = null
+
+                Log.e(
+                    TAG,
+                    "Unable to start bridge server",
+                    exception
+                )
+
+                throw exception
+            }
+        }
+    }
+
+    fun stop() {
+        synchronized(this) {
+            if (!running.getAndSet(false)) {
+                return
+            }
+
+            Log.i(TAG, "Stopping bridge server")
+
+            try {
+                serverSocket?.close()
+            } catch (exception: IOException) {
+                Log.w(
+                    TAG,
+                    "Error while closing bridge socket",
+                    exception
+                )
+            }
+
+            serverSocket = null
+
+            acceptThread?.interrupt()
+            acceptThread = null
+
+            workers?.shutdownNow()
+            workers = null
+
+            commandExecutor?.shutdownNow()
+            commandExecutor = null
+
+            Log.i(TAG, "Bridge server stopped")
+        }
+    }
+
+    fun isRunning(): Boolean {
+        return running.get() &&
+            serverSocket?.isClosed == false
+    }
+
+
+    private fun acceptLoop() {
+        while (running.get()) {
+            try {
+                val socket = serverSocket?.accept()
+                    ?: break
+
+                socket.soTimeout = SOCKET_TIMEOUT_MS
+
+                val executor = workers
+
+                if (executor == null || executor.isShutdown) {
+                    Log.w(
+                        TAG,
+                        "Rejecting client because worker executor is unavailable"
+                    )
+                    socket.close()
+                    continue
+                }
+
+                executor.execute {
+                    handleClient(socket)
+                }
+            } catch (_: java.net.SocketTimeoutException) {
+                continue
+            } catch (exception: SocketException) {
+                if (running.get()) {
+                    Log.e(
+                        TAG,
+                        "Bridge accept loop socket failure",
+                        exception
+                    )
+                }
+            } catch (exception: Exception) {
+                if (running.get()) {
+                    Log.e(
+                        TAG,
+                        "Bridge accept loop failure",
+                        exception
+                    )
+                }
+            }
+        }
+
+        Log.i(TAG, "Bridge accept loop stopped")
+    }
+
+    private fun handleClient(socket: Socket) {
+        socket.use {
+            try {
+                val request = readHttpRequest(socket)
+
+                if (request.method != "POST") {
+                    writeHttpResponse(
+                        socket,
+                        405,
+                        BridgeProtocol.error(
+                            request.requestId,
+                            "METHOD_NOT_ALLOWED",
+                            "Only POST is supported"
+                        )
+                    )
+                    return
+                }
+
+                if (request.path != "/v1/command") {
+                    writeHttpResponse(
+                        socket,
+                        404,
+                        BridgeProtocol.error(
+                            request.requestId,
+                            "NOT_FOUND",
+                            "Endpoint not found"
+                        )
+                    )
+                    return
+                }
+
+                if (!secureEquals(
+                        authenticationToken,
+                        request.authorizationToken
+                    )
+                ) {
+                    Log.w(TAG, "Unauthorized bridge request")
+
+                    writeHttpResponse(
+                        socket,
+                        401,
+                        BridgeProtocol.error(
+                            request.requestId,
+                            "UNAUTHORIZED",
+                            "Authentication failed"
+                        )
+                    )
+                    return
+                }
+
+                val bridgeRequest = try {
+                    BridgeProtocol.parseRequest(
+                        request.body
+                    )
+                } catch (exception: BridgeProtocol.BridgeProtocolException) {
+                    writeHttpResponse(
+                        socket,
+                        400,
+                        BridgeProtocol.error(
+                            request.requestId.ifBlank {
+                                BridgeProtocol.newRequestId()
+                            },
+                            exception.code,
+                            exception.message
+                        )
+                    )
+                    return
+                }
+
+                val response = executeCommand(
+                    bridgeRequest
+                )
+
+                writeHttpResponse(
+                    socket,
+                    if (response.ok) 200 else response.httpCode,
+                    response.json
+                )
+            } catch (exception: Exception) {
+                Log.e(
+                    TAG,
+                    "Client handling failed",
+                    exception
+                )
+
+                try {
+                    writeHttpResponse(
+                        socket,
+                        500,
+                        BridgeProtocol.error(
+                            BridgeProtocol.newRequestId(),
+                            "INTERNAL_ERROR",
+                            "Internal bridge error"
+                        )
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun executeCommand(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        return try {
+            when (request.command) {
+                "health" -> {
+                    val accessibility =
+                        AgentAccessibilityService.getInstance(
+                        )
+
+                    CommandResponse.success(
+                        BridgeProtocol.success(
+                            request.requestId,
+                            JSONObject()
+                                .put(
+                                    "server_running",
+                                    isRunning()
+                                )
+                                .put(
+                                    "accessibility_connected",
+                                    accessibility?.isConnected()
+                                        == true
+                                )
+                        )
+                    )
+                }
+
+                "ui_dump" -> {
+                    val accessibility =
+                        AgentAccessibilityService.getInstance()
+
+                    if (accessibility == null ||
+                        !accessibility.isConnected()
+                    ) {
+                        return CommandResponse.failure(
+                            503,
+                            BridgeProtocol.error(
+                                request.requestId,
+                                "ACCESSIBILITY_NOT_CONNECTED",
+                                "Accessibility service is not connected"
+                            )
+                        )
+                    }
+
+                    val result = accessibility.dumpUi()
+
+                    if (!result.success || result.root == null) {
+                        CommandResponse.failure(
+                            503,
+                            BridgeProtocol.error(
+                                request.requestId,
+                                result.errorCode
+                                    ?: "UI_DUMP_FAILED",
+                                result.errorMessage
+                                    ?: "UI dump failed"
+                            )
+                        )
+                    } else {
+                        CommandResponse.success(
+                            BridgeProtocol.success(
+                                request.requestId,
+                                JSONObject()
+                                    .put(
+                                        "root",
+                                        BridgeProtocol.uiNodeToJson(
+                                            result.root
+                                        )
+                                    )
+                                    .put(
+                                        "truncated",
+                                        result.truncated
+                                    )
+                            )
+                        )
+                    }
+                }
+
+                "screenshot" -> executeScreenshot(request)
+
+                "tap" -> executeTap(request)
+
+                "back" -> executeBack(request)
+
+                "input_text" -> executeInputText(request)
+
+                "swipe" -> executeSwipe(request)
+
+                "long_press" -> executeLongPress(request)
+
+                "clear_text" -> executeClearText(request)
+
+                "erase_text" -> executeEraseText(request)
+
+                "get_window" -> executeWindowInfo(request)
+
+                "key_event" -> executeKeyEvent(request)
+
+                "open_url" -> executeOpenUrl(request)
+
+                "launch_app" -> executeLaunchApp(request)
+
+                else -> {
+                    CommandResponse.failure(
+                        400,
+                        BridgeProtocol.error(
+                            request.requestId,
+                            "UNKNOWN_COMMAND",
+                            "Unsupported command: ${request.command}"
+                        )
+                    )
+                }
+            }
+        } catch (exception: Exception) {
+            Log.e(
+                TAG,
+                "Command execution failed: ${request.command}",
+                exception
+            )
+
+            CommandResponse.failure(
+                500,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTION_FAILED",
+                    exception.message
+                        ?: "Command execution failed"
+                )
+            )
+        }
+    }
+
+    private fun executeScreenshot(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val engine = ScreenshotEngine.getInstance()
+
+        if (engine == null) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "SCREENSHOT_ENGINE_NOT_READY",
+                    "Screenshot engine is not initialized"
+                )
+            )
+        }
+
+        val result = engine.captureDefaultDisplay()
+
+        if (!result.success || result.base64 == null) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.code ?: "SCREENSHOT_FAILED",
+                    result.message ?: "Screenshot capture failed"
+                )
+            )
+        }
+
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject()
+                    .put(
+                        "operation_id",
+                        result.operationId
+                    )
+                    .put(
+                        "width",
+                        result.width
+                    )
+                    .put(
+                        "height",
+                        result.height
+                    )
+                    .put(
+                        "format",
+                        result.format ?: "jpeg"
+                    )
+                    .put(
+                        "quality",
+                        result.quality ?: 85
+                    )
+                    .put(
+                        "byte_count",
+                        result.byteCount
+                    )
+                    .put(
+                        "base64",
+                        result.base64
+                    )
+                    .put(
+                        "elapsed_ms",
+                        result.elapsedMs
+                    )
+            )
+        )
+    }
+
+    private fun executeTap(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        if (!request.args.has("x") ||
+            !request.args.has("y")
+        ) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_COORDINATES",
+                    "tap requires x and y"
+                )
+            )
+        }
+
+        val x = request.args.optDouble("x", Double.NaN)
+        val y = request.args.optDouble("y", Double.NaN)
+
+        if (!x.isFinite() || !y.isFinite()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "INVALID_COORDINATES",
+                    "x and y must be finite numbers"
+                )
+            )
+        }
+
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = commandExecutor
+            ?: return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
+            )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future: Future<AgentAccessibilityService.GestureResult> =
+            executor.submit<AgentAccessibilityService.GestureResult> {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result: AgentAccessibilityService.GestureResult? =
+                    null
+
+                accessibility.tap(
+                    x.toFloat(),
+                    y.toFloat()
+                ) {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.GestureResult(
+                        false,
+                        "GESTURE_TIMEOUT",
+                        "Gesture confirmation timed out",
+                        null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.GestureResult(
+                            false,
+                            "GESTURE_NO_RESULT",
+                            "Gesture returned no result",
+                            null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return if (result.success) {
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject()
+                        .put(
+                            "operation_id",
+                            result.operationId
+                        )
+                        .put("gesture_completed", true)
+                )
+            )
+        } else {
+            CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.errorCode
+                        ?: "GESTURE_FAILED",
+                    result.errorMessage
+                        ?: "Gesture failed"
+                )
+            )
+        }
+    }
+
+    private fun executeBack(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val lock = java.util.concurrent.CountDownLatch(1)
+
+        var result: AgentAccessibilityService.GestureResult? =
+            null
+
+        accessibility.back {
+            result = it
+            lock.countDown()
+        }
+
+        val completed = lock.await(
+            GESTURE_TIMEOUT_MS,
+            TimeUnit.MILLISECONDS
+        )
+
+        if (!completed) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "BACK_TIMEOUT",
+                    "Back action confirmation timed out"
+                )
+            )
+        }
+
+        val finalResult = result
+
+        return if (finalResult?.success == true) {
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject()
+                        .put(
+                            "operation_id",
+                            finalResult.operationId
+                        )
+                        .put("dispatched", true)
+                )
+            )
+        } else {
+            CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    finalResult?.errorCode
+                        ?: "BACK_FAILED",
+                    finalResult?.errorMessage
+                        ?: "Back action failed"
+                )
+            )
+        }
+    }
+
+    private fun executeInputText(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val text = request.args.optString("text", "")
+
+        if (text.isEmpty()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_TEXT",
+                    "input_text requires a non-empty text"
+                )
+            )
+        }
+
+        val accessibility = AgentAccessibilityService.getInstance()
+
+        if (accessibility == null || !accessibility.isConnected()) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = commandExecutor
+            ?: return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
+            )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future: Future<AgentAccessibilityService.GestureResult> =
+            executor.submit {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result: AgentAccessibilityService.GestureResult? =
+                    null
+
+                accessibility.inputText(text) {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.GestureResult(
+                        false,
+                        "INPUT_TIMEOUT",
+                        "Input confirmation timed out",
+                        null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.GestureResult(
+                            false,
+                            "INPUT_NO_RESULT",
+                            "Input returned no result",
+                            null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return gestureResultToResponse(request, result, "INPUT_FAILED")
+    }
+
+    private fun executeSwipe(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        if (!request.args.has("x1") || !request.args.has("y1") ||
+            !request.args.has("x2") || !request.args.has("y2")
+        ) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_COORDINATES",
+                    "swipe requires x1, y1, x2, y2"
+                )
+            )
+        }
+
+        val x1 = request.args.optDouble("x1", Double.NaN)
+        val y1 = request.args.optDouble("y1", Double.NaN)
+        val x2 = request.args.optDouble("x2", Double.NaN)
+        val y2 = request.args.optDouble("y2", Double.NaN)
+
+        if (!x1.isFinite() || !y1.isFinite() ||
+            !x2.isFinite() || !y2.isFinite()
+        ) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "INVALID_COORDINATES",
+                    "swipe coordinates must be finite numbers"
+                )
+            )
+        }
+
+        val durationMs = request.args.optLong("duration_ms", 300L)
+            .coerceIn(1L, 60_000L)
+
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = commandExecutor
+            ?: return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
+            )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future: Future<AgentAccessibilityService.GestureResult> =
+            executor.submit {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result: AgentAccessibilityService.GestureResult? =
+                    null
+
+                accessibility.swipe(
+                    x1.toFloat(),
+                    y1.toFloat(),
+                    x2.toFloat(),
+                    y2.toFloat(),
+                    durationMs
+                ) {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.GestureResult(
+                        false,
+                        "GESTURE_TIMEOUT",
+                        "Swipe confirmation timed out",
+                        null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.GestureResult(
+                            false,
+                            "GESTURE_NO_RESULT",
+                            "Swipe returned no result",
+                            null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return gestureResultToResponse(request, result, "SWIPE_FAILED")
+    }
+
+    private fun executeLongPress(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        if (!request.args.has("x") ||
+            !request.args.has("y")
+        ) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_COORDINATES",
+                    "long_press requires x and y"
+                )
+            )
+        }
+
+        val x = request.args.optDouble("x", Double.NaN)
+        val y = request.args.optDouble("y", Double.NaN)
+
+        if (!x.isFinite() || !y.isFinite()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "INVALID_COORDINATES",
+                    "x and y must be finite numbers"
+                )
+            )
+        }
+
+        val durationMs = request.args.optLong("duration_ms", 600L)
+            .coerceIn(100L, 10_000L)
+
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = commandExecutor
+            ?: return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
+            )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future: Future<AgentAccessibilityService.GestureResult> =
+            executor.submit<AgentAccessibilityService.GestureResult> {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result: AgentAccessibilityService.GestureResult? =
+                    null
+
+                accessibility.longPress(
+                    x.toFloat(),
+                    y.toFloat(),
+                    durationMs
+                ) {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.GestureResult(
+                        false,
+                        "GESTURE_TIMEOUT",
+                        "Long press confirmation timed out",
+                        null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.GestureResult(
+                            false,
+                            "GESTURE_NO_RESULT",
+                            "Long press returned no result",
+                            null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return gestureResultToResponse(
+            request, result, "LONG_PRESS_FAILED"
+        )
+    }
+
+    private fun executeClearText(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = commandExecutor
+            ?: return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
+            )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future: Future<AgentAccessibilityService.GestureResult> =
+            executor.submit {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result: AgentAccessibilityService.GestureResult? =
+                    null
+
+                accessibility.clearText {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.GestureResult(
+                        false,
+                        "CLEAR_TIMEOUT",
+                        "Clear confirmation timed out",
+                        null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.GestureResult(
+                            false,
+                            "CLEAR_NO_RESULT",
+                            "Clear returned no result",
+                            null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return gestureResultToResponse(request, result, "CLEAR_FAILED")
+    }
+
+    private fun executeEraseText(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility = AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = this.executor ?: return CommandResponse.failure(
+            503,
+            BridgeProtocol.error(
+                request.requestId,
+                "COMMAND_EXECUTOR_UNAVAILABLE",
+                "Bridge command executor is unavailable"
+            )
+        )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future: Future<AgentAccessibilityService.GestureResult> =
+            executor.submit {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result: AgentAccessibilityService.GestureResult? =
+                    null
+
+                accessibility.eraseText {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.GestureResult(
+                        false,
+                        "ERASE_TIMEOUT",
+                        "Erase confirmation timed out",
+                        null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.GestureResult(
+                            false,
+                            "ERASE_NO_RESULT",
+                            "Erase returned no result",
+                            null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return gestureResultToResponse(request, result, "ERASE_FAILED")
+    }
+
+    private fun executeWindowInfo(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val info = accessibility.windowInfo()
+
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject()
+                    .put(
+                        "package_name",
+                        info.packageName ?: JSONObject.NULL
+                    )
+                    .put(
+                        "activity_name",
+                        info.activityName ?: JSONObject.NULL
+                    )
+                    .put(
+                        "window_title",
+                        info.windowTitle ?: JSONObject.NULL
+                    )
+            )
+        )
+    }
+
+    private fun executeKeyEvent(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val keycode = request.args.optString("keycode", "").trim()
+
+        if (keycode.isEmpty()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_KEYCODE",
+                    "key_event requires a non-empty keycode"
+                )
+            )
+        }
+
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val lock = java.util.concurrent.CountDownLatch(1)
+
+        var result: AgentAccessibilityService.GestureResult? =
+            null
+
+        accessibility.keyEvent(keycode) {
+            result = it
+            lock.countDown()
+        }
+
+        val completed = lock.await(
+            GESTURE_TIMEOUT_MS,
+            TimeUnit.MILLISECONDS
+        )
+
+        if (!completed) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "KEY_EVENT_TIMEOUT",
+                    "Key event confirmation timed out"
+                )
+            )
+        }
+
+        val finalResult = result
+
+        return gestureResultToResponse(
+            request,
+            finalResult
+                ?: AgentAccessibilityService.GestureResult(
+                    false,
+                    "KEY_EVENT_NO_RESULT",
+                    "Key event returned no result",
+                    null
+                ),
+            "KEY_EVENT_FAILED"
+        )
+    }
+
+    private fun executeOpenUrl(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val url = request.args.optString("url", "").trim()
+
+        if (url.isEmpty()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_URL",
+                    "open_url requires a non-empty url"
+                )
+            )
+        }
+
+        val intent = if (url.startsWith("data:", ignoreCase = true)) {
+            buildDataUrlIntent(url)
+        } else {
+            try {
+                Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            } catch (exception: Exception) {
+                Log.e(TAG, "Failed to parse url", exception)
+                null
+            }
+        } ?: return CommandResponse.failure(
+            400,
+            BridgeProtocol.error(
+                request.requestId,
+                "INVALID_URL",
+                "Could not parse the url"
+            )
+        )
+
+        return try {
+            context.startActivity(intent)
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject()
+                        .put("dispatched", true)
+                        .put("url", url)
+                )
+            )
+        } catch (exception: Exception) {
+            Log.e(TAG, "open_url failed", exception)
+            CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "OPEN_URL_FAILED",
+                    exception.message ?: "Could not open url"
+                )
+            )
+        }
+    }
+
+    private fun executeLaunchApp(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val pkg = request.args.optString("package", "").trim()
+
+        if (pkg.isEmpty()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_PACKAGE",
+                    "launch_app requires a non-empty package"
+                )
+            )
+        }
+
+        return try {
+            val intent =
+                context.packageManager.getLaunchIntentForPackage(pkg)
+                    ?: return CommandResponse.failure(
+                        404,
+                        BridgeProtocol.error(
+                            request.requestId,
+                            "PACKAGE_NOT_FOUND",
+                            "No launchable activity for package $pkg"
+                        )
+                    )
+
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject()
+                        .put("dispatched", true)
+                        .put("package", pkg)
+                )
+            )
+        } catch (exception: Exception) {
+            Log.e(TAG, "launch_app failed", exception)
+            CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "LAUNCH_APP_FAILED",
+                    exception.message ?: "Could not launch app"
+                )
+            )
+        }
+    }
+
+    private fun buildDataUrlIntent(url: String): Intent? {
+        val comma = url.indexOf(',')
+
+        if (comma < 0) {
+            return null
+        }
+
+        val meta = url.substring(4, comma).lowercase()
+        val payload = url.substring(comma + 1)
+        val isBase64 = meta.contains(";base64")
+
+        val html = if (isBase64) {
+            try {
+                String(
+                    Base64.decode(payload, Base64.DEFAULT),
+                    StandardCharsets.UTF_8
+                )
+            } catch (exception: IllegalArgumentException) {
+                Log.e(TAG, "data: url base64 decode failed", exception)
+                return null
+            }
+        } else {
+            try {
+                URLDecoder.decode(payload, "UTF-8")
+            } catch (exception: Exception) {
+                Log.e(TAG, "data: url decode failed", exception)
+                return null
+            }
+        }
+
+        return try {
+            val file = File(context.cacheDir, "agentpro_app.html")
+            file.writeText(html, StandardCharsets.UTF_8)
+
+            val authority = context.packageName + ".fileprovider"
+            val uri = FileProvider.getUriForFile(
+                context,
+                authority,
+                file
+            )
+
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "text/html")
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        } catch (exception: Exception) {
+            Log.e(TAG, "Failed to build data-url intent", exception)
+            null
+        }
+    }
+
+    private fun gestureResultToResponse(
+        request: BridgeProtocol.BridgeRequest,
+        result: AgentAccessibilityService.GestureResult,
+        fallbackCode: String
+    ): CommandResponse {
+        return if (result.success) {
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject()
+                        .put("operation_id", result.operationId)
+                        .put("gesture_completed", true)
+                )
+            )
+        } else {
+            CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.errorCode ?: fallbackCode,
+                    result.errorMessage ?: "Action failed"
+                )
+            )
+        }
+    }
+
+    private fun readHttpRequest(
+        socket: Socket
+    ): HttpRequest {
+        val input = BufferedReader(
+            InputStreamReader(
+                socket.getInputStream(),
+                StandardCharsets.UTF_8
+            )
+        )
+
+        var totalHeaderCharacters = 0
+
+        val requestLine = input.readLine()
+            ?: throw IOException("Missing HTTP request line")
+
+        totalHeaderCharacters += requestLine.length
+
+        if (totalHeaderCharacters > MAX_HEADER_BYTES) {
+            throw IOException("HTTP headers are too large")
+        }
+
+        val requestParts = requestLine.split(" ")
+
+        if (requestParts.size != 3) {
+            throw IOException("Malformed HTTP request line")
+        }
+
+        val method = requestParts[0]
+        val path = requestParts[1]
+        val version = requestParts[2]
+
+        if (version != "HTTP/1.1" &&
+            version != "HTTP/1.0"
+        ) {
+            throw IOException("Unsupported HTTP version")
+        }
+
+        var contentLength = 0
+        var authorizationToken = ""
+        var requestId = ""
+
+        while (true) {
+            val line = input.readLine()
+                ?: throw IOException("Unexpected end of HTTP headers")
+
+            totalHeaderCharacters += line.length + 2
+
+            if (totalHeaderCharacters > MAX_HEADER_BYTES) {
+                throw IOException("HTTP headers are too large")
+            }
+
+            if (line.isEmpty()) {
+                break
+            }
+
+            val separator = line.indexOf(':')
+
+            if (separator <= 0) {
+                throw IOException("Malformed HTTP header")
+            }
+
+            val name = line.substring(
+                0,
+                separator
+            ).trim().lowercase()
+
+            val value = line.substring(
+                separator + 1
+            ).trim()
+
+            when (name) {
+                "content-length" -> {
+                    contentLength = value.toIntOrNull()
+                        ?: throw IOException(
+                            "Invalid Content-Length"
+                        )
+                }
+
+                "authorization" -> {
+                    authorizationToken =
+                        parseBearerToken(value)
+                }
+
+                "x-request-id" -> {
+                    requestId = value
+                }
+            }
+        }
+
+        if (contentLength < 0 ||
+            contentLength > MAX_BODY_BYTES
+        ) {
+            throw IOException(
+                "Request body exceeds allowed size"
+            )
+        }
+
+        val body = CharArray(contentLength)
+
+        var offset = 0
+
+        while (offset < contentLength) {
+            val read = input.read(
+                body,
+                offset,
+                contentLength - offset
+            )
+
+            if (read < 0) {
+                throw IOException(
+                    "Unexpected end of HTTP request body"
+                )
+            }
+
+            offset += read
+        }
+
+        return HttpRequest(
+            method = method,
+            path = path,
+            body = String(body),
+            authorizationToken = authorizationToken,
+            requestId = requestId
+        )
+    }
+
+    private fun parseBearerToken(
+        value: String
+    ): String {
+        val prefix = "Bearer "
+
+        return if (value.startsWith(
+                prefix,
+                ignoreCase = true
+            )
+        ) {
+            value.substring(prefix.length).trim()
+        } else {
+            ""
+        }
+    }
+
+    private fun writeHttpResponse(
+        socket: Socket,
+        statusCode: Int,
+        body: JSONObject
+    ) {
+        val bytes = body
+            .toString()
+            .toByteArray(StandardCharsets.UTF_8)
+
+        val statusText = when (statusCode) {
+            200 -> "OK"
+            400 -> "Bad Request"
+            401 -> "Unauthorized"
+            404 -> "Not Found"
+            405 -> "Method Not Allowed"
+            500 -> "Internal Server Error"
+            503 -> "Service Unavailable"
+            else -> "Error"
+        }
+
+        val writer = BufferedWriter(
+            OutputStreamWriter(
+                socket.getOutputStream(),
+                StandardCharsets.UTF_8
+            )
+        )
+
+        writer.write(
+            "HTTP/1.1 $statusCode $statusText\r\n"
+        )
+        writer.write("Content-Type: application/json; charset=utf-8\r\n")
+        writer.write("Content-Length: ${bytes.size}\r\n")
+        writer.write("Connection: close\r\n")
+        writer.write("\r\n")
+        writer.flush()
+
+        socket.getOutputStream().write(bytes)
+        socket.getOutputStream().flush()
+    }
+
+    private fun secureEquals(
+        expected: String,
+        actual: String
+    ): Boolean {
+        val expectedBytes =
+            expected.toByteArray(StandardCharsets.UTF_8)
+
+        val actualBytes =
+            actual.toByteArray(StandardCharsets.UTF_8)
+
+        if (expectedBytes.size != actualBytes.size) {
+            return false
+        }
+
+        var result = 0
+
+        for (index in expectedBytes.indices) {
+            result = result or (
+                expectedBytes[index].toInt() xor
+                    actualBytes[index].toInt()
+                )
+        }
+
+        return result == 0
+    }
+
+    data class HttpRequest(
+        val method: String,
+        val path: String,
+        val body: String,
+        val authorizationToken: String,
+        val requestId: String
+    )
+
+    data class CommandResponse(
+        val ok: Boolean,
+        val httpCode: Int,
+        val json: JSONObject
+    ) {
+        companion object {
+            fun success(
+                json: JSONObject
+            ): CommandResponse {
+                return CommandResponse(
+                    true,
+                    200,
+                    json
+                )
+            }
+
+            fun failure(
+                httpCode: Int,
+                json: JSONObject
+            ): CommandResponse {
+                return CommandResponse(
+                    false,
+                    httpCode,
+                    json
+                )
+            }
+        }
+    }
+}
