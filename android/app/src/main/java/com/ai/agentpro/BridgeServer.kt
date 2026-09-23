@@ -831,10 +831,41 @@ class BridgeServer(
                 }
             }
 
-        val result = future.get(
-            GESTURE_TIMEOUT_MS + 1_000,
-            TimeUnit.MILLISECONDS
-        )
+        val result = try {
+            future.get(
+                GESTURE_TIMEOUT_MS + 1_000,
+                TimeUnit.MILLISECONDS
+            )
+        } catch (timeoutException: java.util.concurrent.TimeoutException) {
+            Log.e(
+                TAG,
+                "input_text future timed out",
+                timeoutException
+            )
+            AgentAccessibilityService.GestureResult(
+                false,
+                "INPUT_TIMEOUT",
+                "Input task did not complete in time",
+                null
+            )
+        } catch (executionException: java.util.concurrent.ExecutionException) {
+            Log.e(TAG, "input_text task failed", executionException)
+            AgentAccessibilityService.GestureResult(
+                false,
+                "INPUT_TASK_FAILED",
+                executionException.cause?.message
+                    ?: "Input task failed unexpectedly",
+                null
+            )
+        } catch (exception: Exception) {
+            Log.e(TAG, "input_text unexpected failure", exception)
+            AgentAccessibilityService.GestureResult(
+                false,
+                "INPUT_UNEXPECTED",
+                exception.message ?: "Unexpected input failure",
+                null
+            )
+        }
 
         return gestureResultToResponse(request, result, "INPUT_FAILED")
     }
