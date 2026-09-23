@@ -1179,14 +1179,17 @@ class BridgeServer(
             )
         }
 
-        val executor = this.executor ?: return CommandResponse.failure(
-            503,
-            BridgeProtocol.error(
-                request.requestId,
-                "COMMAND_EXECUTOR_UNAVAILABLE",
-                "Bridge command executor is unavailable"
+        val executor = commandExecutor
+        if (executor == null || executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
             )
-        )
+        }
 
         if (executor.isShutdown) {
             return CommandResponse.failure(
