@@ -1608,23 +1608,47 @@ class BridgeServer(
     private fun readHttpRequest(
         socket: Socket
     ): HttpRequest {
-        val input = BufferedReader(
-            InputStreamReader(
-                socket.getInputStream(),
-                StandardCharsets.UTF_8
-            )
-        )
+        val input = socket.getInputStream()
 
-        var totalHeaderCharacters = 0
+        fun readLineBytes(): ByteArray? {
+            val buffer = java.io.ByteArrayOutputStream()
+            var lineBytes = 0
 
-        val requestLine = input.readLine()
+            while (true) {
+                val current = input.read()
+
+                if (current == -1) {
+                    if (lineBytes == 0) {
+                        return null
+                    }
+                    break
+                }
+
+                lineBytes += 1
+
+                totalHeaderCharacters += 1
+
+                if (totalHeaderCharacters > MAX_HEADER_BYTES) {
+                    throw IOException("HTTP headers are too large")
+                }
+
+                if (current == '\n'.code) {
+                    break
+                }
+
+                buffer.write(current)
+            }
+
+            return buffer.toByteArray()
+        }
+
+        val requestLineBytes = readLineBytes()
             ?: throw IOException("Missing HTTP request line")
 
-        totalHeaderCharacters += requestLine.length
-
-        if (totalHeaderCharacters > MAX_HEADER_BYTES) {
-            throw IOException("HTTP headers are too large")
-        }
+        val requestLine = String(
+            requestLineBytes,
+            StandardCharsets.UTF_8
+        ).trimEnd('\r')
 
         val requestParts = requestLine.split(" ")
 
@@ -1642,19 +1666,18 @@ class BridgeServer(
             throw IOException("Unsupported HTTP version")
         }
 
-        var contentLength = 0
-        var authorizationToken = ""
-        var requestId = ""
+        var contentLength = -1
+        var authorizationToken: String? = null
+        var requestId: String? = null
 
         while (true) {
-            val line = input.readLine()
+            val lineBytes = readLineBytes()
                 ?: throw IOException("Unexpected end of HTTP headers")
 
-            totalHeaderCharacters += line.length + 2
-
-            if (totalHeaderCharacters > MAX_HEADER_BYTES) {
-                throw IOException("HTTP headers are too large")
-            }
+            val line = String(
+                lineBytes,
+                StandardCharsets.UTF_8
+            ).trimEnd('\r')
 
             if (line.isEmpty()) {
                 break
@@ -1702,13 +1725,13 @@ class BridgeServer(
             )
         }
 
-        val body = CharArray(contentLength)
+        val bodyBytes = ByteArray(contentLength)
 
         var offset = 0
 
         while (offset < contentLength) {
             val read = input.read(
-                body,
+                bodyBytes,
                 offset,
                 contentLength - offset
             )
@@ -1725,7 +1748,10 @@ class BridgeServer(
         return HttpRequest(
             method = method,
             path = path,
-            body = String(body),
+            body = String(
+                bodyBytes,
+                StandardCharsets.UTF_8
+            ),
             authorizationToken = authorizationToken,
             requestId = requestId
         )
