@@ -1610,6 +1610,8 @@ class BridgeServer(
     ): HttpRequest {
         val input = socket.getInputStream()
 
+        var totalHeaderCharacters = 0
+
         fun readLineBytes(): ByteArray? {
             val buffer = java.io.ByteArrayOutputStream()
             var lineBytes = 0
@@ -1667,8 +1669,8 @@ class BridgeServer(
         }
 
         var contentLength = -1
-        var authorizationToken: String? = null
-        var requestId: String? = null
+        var authorizationToken = ""
+        var requestId = ""
 
         while (true) {
             val lineBytes = readLineBytes()
