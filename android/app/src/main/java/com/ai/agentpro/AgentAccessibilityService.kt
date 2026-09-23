@@ -1,8 +1,8 @@
 package com.ai.agentpro
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityWindowInfo
 import android.accessibilityservice.GestureDescription
+import android.view.accessibility.AccessibilityWindowInfo
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
@@ -611,7 +611,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
             val args = Bundle().apply {
                 putCharSequence(
-                    AccessibilityNodeInfo.ACTION_SET_TEXT_ARGUMENT,
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                     text
                 )
             }
@@ -703,7 +703,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
             val args = Bundle().apply {
                 putCharSequence(
-                    AccessibilityNodeInfo.ACTION_SET_TEXT_ARGUMENT,
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                     ""
                 )
             }
@@ -829,7 +829,7 @@ class AgentAccessibilityService : AccessibilityService() {
             if (!erased) {
                 val args = Bundle().apply {
                     putCharSequence(
-                        AccessibilityNodeInfo.ACTION_SET_TEXT_ARGUMENT,
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                         ""
                     )
                 }

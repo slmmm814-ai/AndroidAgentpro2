@@ -798,7 +798,7 @@ class BridgeServer(
         }
 
         val future: Future<AgentAccessibilityService.GestureResult> =
-            executor.submit {
+            executor.submit<AgentAccessibilityService.GestureResult> {
                 val lock = java.util.concurrent.CountDownLatch(1)
 
                 var result: AgentAccessibilityService.GestureResult? =
@@ -914,7 +914,7 @@ class BridgeServer(
         }
 
         val future: Future<AgentAccessibilityService.GestureResult> =
-            executor.submit {
+            executor.submit<AgentAccessibilityService.GestureResult> {
                 val lock = java.util.concurrent.CountDownLatch(1)
 
                 var result: AgentAccessibilityService.GestureResult? =
@@ -1120,7 +1120,7 @@ class BridgeServer(
         }
 
         val future: Future<AgentAccessibilityService.GestureResult> =
-            executor.submit {
+            executor.submit<AgentAccessibilityService.GestureResult> {
                 val lock = java.util.concurrent.CountDownLatch(1)
 
                 var result: AgentAccessibilityService.GestureResult? =
@@ -1200,7 +1200,7 @@ class BridgeServer(
         }
 
         val future: Future<AgentAccessibilityService.GestureResult> =
-            executor.submit {
+            executor.submit<AgentAccessibilityService.GestureResult> {
                 val lock = java.util.concurrent.CountDownLatch(1)
 
                 var result: AgentAccessibilityService.GestureResult? =
