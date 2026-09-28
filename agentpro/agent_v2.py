@@ -95,6 +95,29 @@ class V2Limits:
             raise ValueError("max_wall_seconds must be > 0")
 
 
+def _gesture_key(tool: str, args: Mapping[str, Any]) -> str:
+    """Identifies one specific gesture, so a different swipe gets a fresh budget."""
+    parts = ",".join(
+        f"{key}={args[key]}"
+        for key in sorted(args)
+        if isinstance(args[key], (int, float, str, bool))
+    )
+    return f"{tool}({parts})"
+
+
+MEASURED_GESTURE_STALL_LIMIT = 3
+
+"""Consecutive measured-useless gestures of the same kind before giving up.
+
+Three is not a guess about screens; it is the smallest number that separates a
+gesture that has genuinely stopped responding from a list that needs a moment,
+while still ending far sooner than the sixteen swipes that used to run until
+the scrollable node was gone.
+"""
+
+_GESTURE_TOOLS = frozenset({"swipe", "scroll"})
+
+
 @dataclass
 class AgentReport:
     success: bool
@@ -127,6 +150,49 @@ class AgentReport:
             "goal_evidence": list(self.goal_evidence),
             "active_subgoal": self.active_subgoal,
         }
+
+
+class MeasuredGestureStall:
+    """Stops a gesture that is *measured* to have done nothing, repeatedly.
+
+    The recovery budget alone is not enough: each recovery presses Back, which
+    changes the screen, which resets the repetition signal that would otherwise
+    have caught the stall. That is how a dead list kept being swiped until the
+    scrollable node disappeared from the tree.
+
+    Only a measurement counts. ``moved=False`` means pixels were read and the
+    screen did not change, so repeating the same gesture is provably pointless.
+    ``moved=None`` means the hash could not be read, and an unmeasured silence
+    never counts towards the limit.
+    """
+
+    def __init__(self, limit: int = MEASURED_GESTURE_STALL_LIMIT) -> None:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        self._limit = limit
+        self._key: str | None = None
+        self._count = 0
+
+    def record(
+        self, key: str, *, measured_no_effect: bool
+    ) -> int | None:
+        """Update the counter, returning the streak when the limit is reached."""
+        if not measured_no_effect:
+            self.reset()
+            return None
+        if key != self._key:
+            self._key = key
+            self._count = 0
+        self._count += 1
+        return self._count if self._count >= self._limit else None
+
+    def reset(self) -> None:
+        self._key = None
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        return self._count
 
 
 class SmartRecovery:
@@ -250,6 +316,7 @@ class AutonomousAgent:
             env_var="AGENTPRO_KILL",
         )
         self.recovery = SmartRecovery(client)
+        self._gesture_stall = MeasuredGestureStall()
         self.authorization_service = authorization_service
         self.owner_confirmation_handler = owner_confirmation_handler
         self.confirmation_handler = confirmation_handler or (lambda _action: False)
@@ -554,6 +621,11 @@ class AutonomousAgent:
                     snapshot = self._observe()
                     continue
 
+                change = self.screen_reader.measure_change(
+                    snapshot,
+                    after,
+                    previous_visual=visual_before,
+                )
                 verification = self.action_verifier.verify(
                     decision.tool,
                     dict(decision.args),
@@ -561,16 +633,14 @@ class AutonomousAgent:
                     result.error_code,
                     snapshot,
                     after,
-                    self.screen_reader.measure_change(
-                        snapshot,
-                        after,
-                        previous_visual=visual_before,
-                    ),
+                    change,
                 )
                 self._t(
                     "v2_action_verified",
                     tool=decision.tool,
                     result=verification.value,
+                    moved=change.moved,
+                    distance=change.distance,
                 )
 
                 if verification is ActionVerification.FAILED:
@@ -581,6 +651,35 @@ class AutonomousAgent:
                         detail=result.error_message or "tool execution failed",
                         recovered_by="back",
                     )
+
+                    streak = self._gesture_stall.record(
+                        _gesture_key(decision.tool, decision.args),
+                        measured_no_effect=(
+                            decision.tool in _GESTURE_TOOLS
+                            and result.success
+                            and change.moved is False
+                        ),
+                    )
+                    if streak is not None:
+                        reason = (
+                            f"{decision.tool} did not move the screen "
+                            f"{streak} times in a row; the target is not "
+                            f"responding to gestures"
+                        )
+                        self.memory.record_failure(
+                            context.step,
+                            action_line=decision.tool,
+                            error_code="GESTURE_NO_EFFECT",
+                            detail=reason,
+                            recovered_by="stop",
+                        )
+                        self._t(
+                            "v2_gesture_stalled",
+                            tool=decision.tool,
+                            streak=streak,
+                        )
+                        return self._fail(reason)
+
                     self._recover("action failed", after)
                     snapshot = self._observe()
                     continue

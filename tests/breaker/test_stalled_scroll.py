@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence, cast
 
 from agentpro.agent_runner import FakeResponse
-from agentpro.agent_v2 import AutonomousAgent, V2Limits
+from agentpro.agent_v2 import (
+    MEASURED_GESTURE_STALL_LIMIT,
+    AutonomousAgent,
+    V2Limits,
+)
 from agentpro.llm_planner import FakeLLMClient
 from agentpro.planner_v2 import PlanDecision, SubgoalPlanner
 from agentpro.screen import ScreenReader
@@ -272,6 +276,62 @@ class StalledScrollTests(unittest.TestCase):
         self.assertIsNone(self.reader.capture_visual(force=True))
         self.assertNotEqual(self.reader._last_visual_hash, None)
         self.assertEqual(self.reader._last_visual_hash, good)
+
+    def test_agent_stops_after_three_measured_dead_swipes(self) -> None:
+        """The reported symptom, with a recovery budget large enough to hide it.
+
+        With max_recoveries=10 the old loop kept swiping until the scrollable
+        node left the tree, because each Back press changed the screen and
+        reset the repetition signal. The stall counter is independent of that.
+        """
+        # A later disappearance, so the assertion is about the agent stopping
+        # early rather than about where the fake's own timeline happens to fall.
+        bridge = StalledScrollBridge(live_swipes=3, disappear_after=8)
+        reader = ScreenReader(bridge, visual_interval_s=0.0, visual_threshold=6)
+        agent = AutonomousAgent(
+            bridge,
+            FakeLLMClient(responder=lambda messages: "{}"),
+            model="test",
+            limits=V2Limits(max_steps=60, max_recoveries=10),
+            planner=cast(SubgoalPlanner, SwipeOnlyPlanner()),
+            screen_reader=reader,
+            action_verifier=ActionVerifier(),
+        )
+        report = agent.run("read the message near the end of the conversation")
+
+        self.assertEqual(
+            bridge.swipes - bridge._live,
+            MEASURED_GESTURE_STALL_LIMIT,
+            "must stop after exactly the stall limit, not keep swiping",
+        )
+        self.assertIn("did not move the screen", report.reason)
+        self.assertFalse(report.success)
+        self.assertFalse(
+            bridge.scrollable_vanished,
+            "the scrollable node must still be on screen when the agent gives up",
+        )
+
+    def test_unmeasured_swipes_are_never_counted_as_a_stall(self) -> None:
+        """A hash we could not read must not stop the agent on false evidence."""
+        agent = AutonomousAgent(
+            self.bridge,
+            FakeLLMClient(responder=lambda messages: "{}"),
+            model="test",
+            limits=V2Limits(max_steps=60, max_recoveries=10),
+            planner=cast(SubgoalPlanner, SwipeOnlyPlanner()),
+            screen_reader=self.reader,
+            action_verifier=self.verifier,
+        )
+        self.reader.capture_visual = lambda **kwargs: None  # type: ignore[method-assign]
+
+        report = agent.run("read the message near the end of the conversation")
+
+        self.assertNotIn("did not move the screen", report.reason)
+        self.assertGreater(
+            self.bridge.swipes,
+            self.bridge._live + MEASURED_GESTURE_STALL_LIMIT,
+            "without a measurement the agent must not claim the screen is stuck",
+        )
 
     def test_measured_dead_swipe_is_recorded_as_failed_in_the_trace(self) -> None:
         """The pixel channel's real effect: an honest verdict, not fewer steps.
