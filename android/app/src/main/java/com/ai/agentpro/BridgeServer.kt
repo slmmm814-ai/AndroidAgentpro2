@@ -414,6 +414,8 @@ class BridgeServer(
 
                 "screenshot" -> executeScreenshot(request)
 
+                "visual_hash" -> executeVisualHash(request)
+
                 "tap" -> executeTap(request)
 
                 "back" -> executeBack(request)
@@ -464,6 +466,74 @@ class BridgeServer(
                 )
             )
         }
+    }
+
+    /**
+     * Returns a compact perceptual hash of the current screen.
+     *
+     * Answers "did anything move" with a 64-character string instead of a
+     * 300-400 KB JPEG, so the caller can measure screen change on every step
+     * without JPEG artefacts or screenshot rate limiting getting in the way.
+     */
+    private fun executeVisualHash(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val engine = ScreenshotEngine.getInstance()
+
+        if (engine == null) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "SCREENSHOT_ENGINE_NOT_READY",
+                    "Screenshot engine is not initialized"
+                )
+            )
+        }
+
+        val result = engine.captureVisualHash()
+
+        if (!result.success || result.hash == null) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.code ?: "VISUAL_HASH_FAILED",
+                    result.message ?: "Visual hash capture failed"
+                )
+            )
+        }
+
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject()
+                    .put(
+                        "operation_id",
+                        result.operationId
+                    )
+                    .put(
+                        "hash",
+                        result.hash
+                    )
+            )
+        )
     }
 
     private fun executeScreenshot(

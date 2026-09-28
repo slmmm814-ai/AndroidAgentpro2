@@ -136,10 +136,57 @@ Useful flags: `--max-actions 80`, `--max-model-calls 200`,
 | `AGENTPRO_LLM_MODEL` | no | `gpt-4o-mini` | Model name |
 | `AGENTPRO_LLM_BASE_URL` | no | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint (OpenRouter, Ollama, lm-studio) |
 | `AGENTPRO_KILL` | no | — | If set (any value), the agent stops immediately |
+| `AGENTPRO_MCP` | no | off | Set to `1` to attach remote MCP tools at startup |
+| `AGENTPRO_MCP_URL` | no | `https://mcp.higgsfield.ai/mcp` | MCP endpoint (setting it also enables MCP) |
+| `AGENTPRO_MCP_INCLUDE` | no | all | Comma-separated shell patterns of remote tools to expose |
+| `AGENTPRO_MCP_EXCLUDE` | no | none | Comma-separated patterns to skip |
+| `AGENTPRO_MCP_PREFIX` | no | `hf_` | Prefix for the local tool names |
+| `AGENTPRO_MCP_TOKEN` | no | — | Bearer token; otherwise `~/.agentpro/mcp_token.json` is used |
+| `AGENTPRO_MCP_USER_AGENT` | no | `AndroidAgentPro/1.0` | Some gateways reject the stdlib default |
 
 To use a **local** model (no external API): run
 `OLLAMA_HOST=... ollama serve` (OpenAI-compatible at `http://localhost:11434/v1`)
 and set `AGENTPRO_LLM_BASE_URL` accordingly with any non-empty `AGENTPRO_LLM_API_KEY`.
+
+## Remote MCP tools (Higgsfield, or any MCP server)
+
+The agent speaks the MCP protocol directly over stdlib HTTP, so image/video
+generation tools advertised by a server land in the **same registry** as `tap`
+and `screenshot`: the planner sees their JSON schemas, the authorization hook
+and trace recorder treat them like any other tool.
+
+**1. Log in once** (Higgsfield is an OAuth-protected resource):
+
+```bash
+python3 -m agentpro.mcp_oauth login      # prints a URL; approve it in the phone browser
+python3 -m agentpro.mcp_oauth whoami     # token state, scope, expiry
+```
+
+`login` registers a public OAuth client dynamically (RFC 7591), starts a loopback
+listener on `127.0.0.1:8765`, and exchanges the returned code with PKCE (S256).
+The token is stored at `~/.agentpro/mcp_token.json` (mode `0600`) and refreshed
+automatically. `logout` removes it. `AGENTPRO_MCP_TOKEN` overrides the file.
+
+**2. Enable it for a run:**
+
+```bash
+AGENTPRO_MCP=1 python3 -m agentpro --goal "make a 10s ad video for a coffee shop"
+```
+
+MCP is **off by default**, so startup never touches the network; a failing or
+unauthenticated endpoint is reported and the agent continues with its local
+tools. Use `AGENTPRO_MCP_INCLUDE=hf_*` to keep the catalogue small, and
+`--allow-tool <name>` to pre-authorize a specific generated tool.
+
+Programmatic use:
+
+```python
+from agentpro.bridge_tools import build_default_registry
+from agentpro.mcp_tools import mcp_client_from_env, register_mcp_tools
+
+registry = build_default_registry()                 # or build_default_registry(mcp=...)
+names = register_mcp_tools(registry, mcp_client_from_env())
+```
 
 ## Safety model
 
@@ -163,13 +210,16 @@ agentpro/            # Python agent core (testable)
   planner_v2.py      # hierarchical tool-based planning
   verification.py    # action / progress / goal verifiers
   bridge_tools.py    # unified Tool System + dangerous-tool gating
+  mcp_client.py      # MCP client: JSON-RPC 2.0 over Streamable HTTP + SSE
+  mcp_tools.py       # remote MCP tools -> local Tool objects
+  mcp_oauth.py       # OAuth 2.1 (discovery, dynamic registration, PKCE, device flow)
   budgets.py / memory.py / model_manager.py / authorization.py
   __main__.py        # CLI (v2 default): python -m agentpro --self-test
   self_test.py       # offline v2 loop proof (simulated phone)
   demos/calculator_tour.py
 python_core/        # on-host bridge client
 android/            # on-device Kotlin (BridgeServer, AccessibilityService)
-tests/              # 412 unit tests (unittest)
+tests/              # 644 unit tests (unittest)
 docs/operations/OPERATIONS.md
 ```
 

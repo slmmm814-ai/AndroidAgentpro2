@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import pathlib
 import unittest
 
 from agentpro.agent_runner import FakeResponse, RecordingBridgeClient
 from agentpro.screen import (
+    InteractiveElement,
     ScreenReader,
     compute_fingerprint,
+    difference_hash,
     extract_elements,
+    hamming_distance,
+    new_content_ratio,
+    scroll_container_bounds,
     summarize_screen,
 )
 
@@ -116,6 +122,271 @@ class FingerprintTests(unittest.TestCase):
         f1 = compute_fingerprint(extract_elements(base))
         f2 = compute_fingerprint(extract_elements(changed))
         self.assertNotEqual(f1, f2)
+
+
+class ChangeChannelTests(unittest.TestCase):
+    """The two channels answer different questions and must stay separate."""
+
+    def _screen(self, texts: list[str], scrollable: bool = False) -> list:
+        root = {
+            "class": "android.widget.FrameLayout",
+            "package": "com.example.app",
+            "children": [
+                {
+                    "class": "android.widget.TextView",
+                    "text": text,
+                    "bounds": f"[0,{200 + i * 150}][1080,{300 + i * 150}]",
+                }
+                for i, text in enumerate(texts)
+            ],
+        }
+        if scrollable:
+            root["children"].insert(
+                0,
+                {
+                    "class": "android.view.View",
+                    "bounds": "[0,0][1080,1832]",
+                    "scrollable": True,
+                },
+            )
+        return extract_elements(root)
+
+    def test_scroll_repositions_without_new_content(self) -> None:
+        before = self._screen(["a", "b", "c"], scrollable=True)
+        after = [
+            InteractiveElement(
+                node_index=el.node_index,
+                class_name=el.class_name,
+                package=el.package,
+                resource_id=el.resource_id,
+                text=el.text,
+                content_desc=el.content_desc,
+                bounds=(el.left, el.top - 600, el.right, el.bottom - 600),
+                clickable=el.clickable,
+                scrollable=el.scrollable,
+            )
+            for el in before
+        ]
+        self.assertEqual(new_content_ratio(before, after), 0.0)
+        self.assertNotEqual(
+            compute_fingerprint(before), compute_fingerprint(after)
+        )
+
+    def test_new_page_reports_new_content(self) -> None:
+        before = self._screen(["a", "b"], scrollable=True)
+        after = self._screen(["c", "d"], scrollable=True)
+        self.assertEqual(new_content_ratio(before, after), 1.0)
+
+    def test_partially_new_content(self) -> None:
+        before = self._screen(["a", "b"], scrollable=True)
+        after = self._screen(["a", "b", "c", "d"], scrollable=True)
+        self.assertAlmostEqual(new_content_ratio(before, after), 0.5)
+
+    def test_container_bounds_detects_keyboard(self) -> None:
+        without_keyboard = self._screen(["a"], scrollable=True)
+        with_keyboard = [
+            InteractiveElement(
+                node_index=el.node_index,
+                class_name=el.class_name,
+                package=el.package,
+                resource_id=el.resource_id,
+                text=el.text,
+                content_desc=el.content_desc,
+                bounds=el.bounds if not el.scrollable else (0, 0, 1080, 959),
+                scrollable=el.scrollable,
+            )
+            for el in without_keyboard
+        ]
+        without_keyboard_bounds = scroll_container_bounds(without_keyboard)
+        with_keyboard_bounds = scroll_container_bounds(with_keyboard)
+        self.assertIsNotNone(without_keyboard_bounds)
+        self.assertIsNotNone(with_keyboard_bounds)
+        assert without_keyboard_bounds is not None
+        assert with_keyboard_bounds is not None
+        self.assertEqual(without_keyboard_bounds[3], 1832)
+        self.assertEqual(with_keyboard_bounds[3], 959)
+
+    def test_container_bounds_absent_without_scrollable(self) -> None:
+        self.assertIsNone(scroll_container_bounds(self._screen(["a"])))
+
+    def test_hamming_distance_basics(self) -> None:
+        self.assertEqual(hamming_distance(0b1010, 0b1010), 0)
+        self.assertEqual(hamming_distance(0b1010, 0b0101), 4)
+
+    def test_difference_hash_survives_jpeg_recompression(self) -> None:
+        """The real noise source: JPEG re-encoding of a static dark screen.
+
+        Measured on device: two idle screenshots of the same screen had
+        different JPEG md5 and a naive per-pixel diff of 0.65, while dHash
+        reported 0. Re-encoding the same frame at low quality reproduces that
+        condition without needing a device.
+        """
+        import io
+
+        from PIL import Image, ImageDraw
+
+        def dark_frame() -> Image.Image:
+            image = Image.new("L", (240, 480), color=24)
+            draw = ImageDraw.Draw(image)
+            draw.rectangle([20, 40, 220, 90], fill=180)
+            draw.rectangle([20, 120, 150, 150], fill=90)
+            return image
+
+        def as_jpeg(image: Image.Image, quality: int) -> Image.Image:
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality)
+            return Image.open(io.BytesIO(buffer.getvalue()))
+
+        original = dark_frame()
+        baseline = difference_hash(as_jpeg(original, 80))
+        recompressed = as_jpeg(original, 45)
+
+        self.assertNotEqual(
+            original.tobytes(), recompressed.tobytes()
+        )
+        self.assertEqual(difference_hash(recompressed), baseline)
+
+    def test_difference_hash_detects_real_change(self) -> None:
+        from PIL import Image, ImageDraw
+
+        plain = Image.new("L", (240, 480), color=24)
+        marked = Image.new("L", (240, 480), color=24)
+        ImageDraw.Draw(marked).rectangle([10, 10, 230, 470], fill=220)
+        self.assertGreater(
+            hamming_distance(difference_hash(plain), difference_hash(marked)), 6
+        )
+
+
+class VisualHashChannelTests(unittest.TestCase):
+    """The bridge hashes on device; a failure must never read as 'no change'."""
+
+    class _HashClient:
+        def __init__(self, hashes: list[object]) -> None:
+            self._hashes = list(hashes)
+            self.calls = 0
+
+        def command(self, name: str, args: dict) -> object:
+            self.calls += 1
+            value = self._hashes.pop(0) if self._hashes else None
+
+            class Response:
+                def __init__(self, data: object) -> None:
+                    self.data = data
+
+            if isinstance(value, Exception):
+                raise value
+            if value is None:
+                return Response({"hash": None})
+            return Response({"hash": value})
+
+    def test_reads_bridge_hash(self) -> None:
+        client = self._HashClient(["ff00ff00"])
+        reader = ScreenReader(client)
+        self.assertEqual(reader.capture_visual(), 0xFF00FF00)
+
+    def test_failed_capture_returns_none(self) -> None:
+        client = self._HashClient([RuntimeError("bridge down")])
+        self.assertIsNone(ScreenReader(client).capture_visual())
+
+    def test_malformed_hash_returns_none(self) -> None:
+        client = self._HashClient(["not-hex"])
+        self.assertIsNone(ScreenReader(client).capture_visual())
+
+    def test_stale_hash_is_not_replayed_after_failure(self) -> None:
+        """The core anti-false-negative rule, at the channel level."""
+        client = self._HashClient(["abcdef01", RuntimeError("timeout")])
+        reader = ScreenReader(client, visual_interval_s=0.0)
+        self.assertEqual(reader.capture_visual(), 0xABCDEF01)
+        self.assertIsNone(reader.capture_visual(force=True))
+
+    def test_change_unknown_without_previous_visual(self) -> None:
+        client = self._HashClient(["00000000"])
+        reader = ScreenReader(client, visual_interval_s=0.0)
+        change = reader.measure_change(None, None)
+        self.assertIsNone(change.moved)
+        self.assertIsNone(change.distance)
+        self.assertFalse(change.settled)
+
+    def test_change_measured_against_previous_visual(self) -> None:
+        client = self._HashClient(["0000ffff"])
+        reader = ScreenReader(client, visual_interval_s=0.0, visual_threshold=6)
+        change = reader.measure_change(
+            None, None, previous_visual=0x0000FFFF ^ 0x00FF00FF
+        )
+        self.assertEqual(change.distance, 16)
+        self.assertTrue(change.moved)
+        self.assertTrue(change.moved_without_new_content)
+        self.assertFalse(change.settled)
+
+    def test_unchanged_screen_below_threshold(self) -> None:
+        client = self._HashClient(["0000ffff"])
+        reader = ScreenReader(client, visual_interval_s=0.0, visual_threshold=6)
+        change = reader.measure_change(
+            None, None, previous_visual=0x0000FFFF ^ 0x00000003
+        )
+        self.assertEqual(change.distance, 2)
+        self.assertFalse(change.moved)
+        self.assertTrue(change.settled)
+
+    def test_interval_serves_cached_hash(self) -> None:
+        client = self._HashClient(["0000ffff"])
+        reader = ScreenReader(client, visual_interval_s=60.0)
+        self.assertEqual(reader.capture_visual(), 0x0000FFFF)
+        self.assertEqual(reader.capture_visual(), 0x0000FFFF)
+        self.assertEqual(client.calls, 1)
+
+    def test_rate_limited_bridge_reads_as_unknown_not_still(self) -> None:
+        client = self._HashClient(
+            ["0000ffff", RuntimeError("Screenshot requested too frequently")]
+        )
+        reader = ScreenReader(client, visual_interval_s=0.0)
+        first = reader.capture_visual(force=True)
+        self.assertEqual(first, 0x0000FFFF)
+        change = reader.measure_change(
+            None, None, previous_visual=first
+        )
+        self.assertIsNone(change.moved)
+        self.assertFalse(change.settled)
+
+
+class VisualHashBridgeContractTests(unittest.TestCase):
+    """Python depends on a Kotlin-only command, so its presence is asserted.
+
+    Nothing at runtime checks that ``visual_hash`` still exists on the Android
+    side: if the Kotlin command were dropped, the pixel channel would silently
+    report "unknown" forever instead of failing loudly.
+    """
+
+    _KOTLIN_DIR = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "android"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "com"
+        / "ai"
+        / "agentpro"
+    )
+
+    def test_bridge_dispatches_visual_hash(self) -> None:
+        source = (self._KOTLIN_DIR / "BridgeServer.kt").read_text()
+        self.assertIn('"visual_hash" -> executeVisualHash(request)', source)
+
+    def test_visual_hash_implementation_present(self) -> None:
+        self.assertTrue((self._KOTLIN_DIR / "VisualHash.kt").exists())
+
+    def test_visual_hash_shape_matches_python_hash_size(self) -> None:
+        source = (self._KOTLIN_DIR / "VisualHash.kt").read_text()
+        self.assertIn("fun compute(bitmap: Bitmap, size: Int = 16)", source)
+
+    def test_python_sends_the_command(self) -> None:
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "agentpro"
+            / "screen.py"
+        ).read_text()
+        self.assertIn('self._client.command("visual_hash", {})', source)
 
 
 class SummarizeScreenTests(unittest.TestCase):

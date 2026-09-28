@@ -310,6 +310,16 @@ def _run_real(args: argparse.Namespace, *, legacy: bool) -> int:
                 pre_authorized,
             )
             registry = build_default_registry()
+            from .mcp_tools import attach_mcp_from_env
+
+            mcp = attach_mcp_from_env(registry)
+            if mcp.error:
+                print(f"MCP unavailable ({mcp.url}): {mcp.error}")
+            elif mcp.names:
+                print(
+                    f"MCP: {len(mcp.names)} tools from {mcp.url} "
+                    f"(e.g. {', '.join(mcp.names[:5])})"
+                )
             for name in pre_authorized:
                 if registry.get(name) is not None:
                     registry.enable(name, enabled=True)

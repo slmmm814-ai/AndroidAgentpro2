@@ -423,5 +423,45 @@ class SmartRecoveryTests(unittest.TestCase):
         self.assertIn("back", client.commands)
 
 
+class MeasuredGestureStallTests(unittest.TestCase):
+    """The counter that ends a gesture proven to have done nothing."""
+
+    def setUp(self) -> None:
+        from agentpro.agent_v2 import MeasuredGestureStall
+
+        self.stall = MeasuredGestureStall(limit=3)
+
+    def test_stops_on_the_third_consecutive_dead_gesture(self) -> None:
+        self.assertIsNone(self.stall.record("swipe(a)", measured_no_effect=True))
+        self.assertIsNone(self.stall.record("swipe(a)", measured_no_effect=True))
+        self.assertEqual(self.stall.record("swipe(a)", measured_no_effect=True), 3)
+
+    def test_a_different_gesture_gets_a_fresh_budget(self) -> None:
+        self.stall.record("swipe(a)", measured_no_effect=True)
+        self.stall.record("swipe(a)", measured_no_effect=True)
+        self.assertIsNone(self.stall.record("swipe(b)", measured_no_effect=True))
+        self.assertEqual(self.stall.count, 1)
+
+    def test_unmeasured_never_counts(self) -> None:
+        for _ in range(10):
+            self.assertIsNone(
+                self.stall.record("swipe(a)", measured_no_effect=False)
+            )
+        self.assertEqual(self.stall.count, 0)
+
+    def test_a_working_gesture_clears_the_streak(self) -> None:
+        self.stall.record("swipe(a)", measured_no_effect=True)
+        self.stall.record("swipe(a)", measured_no_effect=True)
+        self.stall.record("swipe(a)", measured_no_effect=False)
+        self.assertIsNone(self.stall.record("swipe(a)", measured_no_effect=True))
+        self.assertEqual(self.stall.count, 1)
+
+    def test_limit_must_be_positive(self) -> None:
+        from agentpro.agent_v2 import MeasuredGestureStall
+
+        with self.assertRaises(ValueError):
+            MeasuredGestureStall(limit=0)
+
+
 if __name__ == "__main__":
     unittest.main()

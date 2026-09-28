@@ -322,7 +322,14 @@ def extract_elements(ui_root: Mapping[str, Any] | None) -> list[InteractiveEleme
 
 
 def compute_fingerprint(elements: Sequence[InteractiveElement]) -> str:
-    """Stable, screen-position-tolerant fingerprint for change detection."""
+    """Stable, screen-position-tolerant fingerprint for change detection.
+
+    NOTE: this signature folds ``bucket_x``/``bucket_y`` (centre // 85) into a
+    single hash, so it answers "did *something* change", not "did the screen
+    move". A scroll that keeps every element inside the same 85px bucket is
+    invisible here. For "did the screen actually move", use
+    :func:`visual_hash` instead, which is an independent channel.
+    """
     signature: list[str] = []
     for el in elements:
         cx = (el.left + el.right) // 2
@@ -346,6 +353,133 @@ def compute_fingerprint(elements: Sequence[InteractiveElement]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
+@dataclass(frozen=True)
+class ScreenChange:
+    """Result of comparing two observations across independent channels.
+
+    ``moved`` answers "did the screen visibly change" from pixels, which is a
+    measurement rather than an inference from the element tree. It is
+    ``None`` when no frame could be hashed, which is deliberately distinct
+    from ``False``: a missing measurement must never be reported as "nothing
+    moved". The pixel channel cannot say *what* changed, only that something did.
+    """
+
+    moved: bool | None
+    distance: int | None
+    new_content_ratio: float
+    container_shrank: bool
+    before_container_bottom: int | None
+    after_container_bottom: int | None
+
+    @property
+    def settled(self) -> bool:
+        """True only when pixels were compared and nothing moved or appeared.
+
+        Returns ``False`` while the pixel channel is unknown, so an
+        uncapturable screen can never look settled.
+        """
+        return self.moved is False and self.new_content_ratio == 0.0
+
+    @property
+    def moved_without_new_content(self) -> bool:
+        """Pixels changed while the element tree showed no new content.
+
+        Consistent with a scroll that re-showed known content. Not proof of a
+        scroll: any other visual change without new text also lands here.
+        """
+        return self.moved is True and self.new_content_ratio == 0.0
+
+    @property
+    def content_changed(self) -> bool:
+        """True when new content appeared (a page load, a new message)."""
+        return self.new_content_ratio > 0.0
+
+
+def element_signature(element: InteractiveElement) -> tuple[str, str, str]:
+    """Content identity of an element, with no positional information.
+
+    Two screens showing the same text compare equal regardless of where the
+    text sits, which is what makes "did new content arrive" separable from
+    "did the screen move".
+    """
+    return (
+        str(element.class_name).split(".")[-1],
+        (element.text or "")[:80],
+        (element.content_desc or "")[:80],
+    )
+
+
+def content_set(elements: Sequence[InteractiveElement]) -> set[tuple[str, str, str]]:
+    """Set of :func:`element_signature` values for the screen's *content*.
+
+    Nodes carrying neither text nor a content description are structural
+    (layout containers, dividers) and are excluded. They never change while
+    scrolling, so leaving them in the denominator would deflate every ratio
+    permanently and cap it below 1.0, making any threshold unreliable.
+
+    Limitation: identity here is text-based, so repeated identical rows (a table
+    of equal values) collapse into one entry and their count is not preserved.
+    The ratio answers "did text I had not seen arrive", not "how many rows are
+    new".
+    """
+    return {
+        element_signature(el)
+        for el in elements
+        if (el.text or "").strip() or (el.content_desc or "").strip()
+    }
+
+
+def new_content_ratio(
+    before: Sequence[InteractiveElement],
+    after: Sequence[InteractiveElement],
+) -> float:
+    """Share of ``after`` elements whose content was absent from ``before``.
+
+    Scrolling re-positions existing elements and therefore scores ``0.0``;
+    content that newly entered the viewport scores above ``0.0``. This is a
+    different question from "did the screen move", and the two are reported
+    separately on purpose.
+    """
+    seen = content_set(before)
+    after_set = content_set(after)
+    if not after_set:
+        return 0.0
+    return len(after_set - seen) / len(after_set)
+
+
+def scroll_container_bounds(
+    elements: Sequence[InteractiveElement],
+) -> tuple[int, int, int, int] | None:
+    """Bounds of the largest scrollable node, or ``None`` if there is none."""
+    scrollables = [el for el in elements if el.scrollable]
+    if not scrollables:
+        return None
+    return max(scrollables, key=lambda el: el.area()).bounds
+
+
+def difference_hash(image: Any, size: int = 16) -> int:
+    """256-bit dHash of a PIL image: robust to JPEG compression noise.
+
+    Measured on device, ``size=16`` with a distance threshold of 6 separated an
+    idle screen (0), a swipe that never reached the list (14) and a real scroll
+    (32). A naive per-pixel threshold scored the same idle screen at 0.65
+    "changed" purely from JPEG artefacts, so a compression-tolerant hash has to
+    come before any pixel comparison can be trusted.
+    """
+    small = image.convert("L").resize((size + 1, size))
+    pixels = small.load()
+    bits = 0
+    for y in range(size):
+        for x in range(size):
+            bits = (bits << 1) | (1 if pixels[x, y] > pixels[x + 1, y] else 0)
+    return bits
+
+
+def hamming_distance(left: int, right: int) -> int:
+    """Number of differing bits between two hashes."""
+    return bin(left ^ right).count("1")
+
+
 class ScreenReader:
     """Reads the device screen through the bridge and enriches it."""
 
@@ -355,10 +489,16 @@ class ScreenReader:
         *,
         include_screenshot: bool = True,
         max_elements: int = 200,
+        visual_interval_s: float = 0.35,
+        visual_threshold: int = 6,
     ) -> None:
         self._client = client
         self._include_screenshot = include_screenshot
         self._max_elements = max_elements
+        self._visual_interval_s = visual_interval_s
+        self._visual_threshold = visual_threshold
+        self._last_visual_at: float | None = None
+        self._last_visual_hash: int | None = None
 
     def get_window_info(self) -> tuple[str | None, str | None, str | None]:
         package: str | None = None
@@ -458,6 +598,113 @@ class ScreenReader:
             tree_truncated=tree_truncated,
             error_code=error_code,
             error_message=error_message,
+        )
+
+    def capture_visual(self, *, force: bool = False) -> int | None:
+        """Return a dHash of the current screen, or ``None`` if it failed.
+
+        The bridge hashes the frame on device and returns 64 hex characters, so
+        no image library is needed and the 300-400 KB JPEG transfer, its
+        compression artefacts and its capture rate limit are all avoided. Raw
+        pixels are never compared: measured on device, JPEG re-encoding made an
+        idle screen differ by 0.65 under a naive per-pixel metric.
+
+        Within ``visual_interval_s`` a cached hash is returned so callers can
+        poll cheaply; pass ``force`` after performing an action to wait out the
+        interval and get a genuine fresh frame. The default sits just above
+        ``ScreenshotEngine.MIN_CAPTURE_INTERVAL_MS`` (250 ms) on the Android
+        side, so a forced re-capture costs a fraction of a second per action
+        instead of the multi-second wait a screenshot round trip would need.
+
+        A failed capture returns ``None``, never the previous hash. Returning a
+        stale hash would make a broken capture look identical to a static
+        screen, which is the exact false "nothing happened" this channel exists
+        to rule out.
+        """
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_visual_hash is not None
+            and self._last_visual_at is not None
+            and now - self._last_visual_at < self._visual_interval_s
+        ):
+            return self._last_visual_hash
+
+        if force and self._last_visual_at is not None:
+            remaining = self._visual_interval_s - (now - self._last_visual_at)
+            if remaining > 0:
+                time.sleep(remaining)
+
+        try:
+            response = self._client.command("visual_hash", {})
+        except Exception:
+            return None
+        data = getattr(response, "data", None)
+        if not isinstance(data, Mapping):
+            return None
+        encoded = data.get("hash")
+        if not isinstance(encoded, str) or not encoded:
+            return None
+        try:
+            digest = int(encoded, 16)
+        except ValueError:
+            return None
+        self._last_visual_hash = digest
+        self._last_visual_at = time.monotonic()
+        return digest
+
+    def measure_change(
+        self,
+        before: ScreenSnapshot | None,
+        after: ScreenSnapshot | None,
+        *,
+        previous_visual: int | None = None,
+    ) -> ScreenChange:
+        """Compare two snapshots on both channels and report the result.
+
+        Pixel distance answers whether anything moved; the content ratio
+        answers whether new content arrived. Reporting them separately is what
+        lets "the swipe did nothing" be told apart from "the screen moved but
+        showed nothing new" — a distinction the element fingerprint alone
+        cannot make.
+
+        ``previous_visual`` must be the hash captured *before* the action. It is
+        not guessed from the last cached frame: comparing against an unrelated
+        frame would produce a confident verdict about the wrong baseline, so
+        without it the pixel channel reports ``moved=None``.
+        """
+        after_hash = self.capture_visual(force=True)
+
+        distance: int | None = None
+        moved: bool | None = None
+        if previous_visual is not None and after_hash is not None:
+            distance = hamming_distance(previous_visual, after_hash)
+            moved = distance > self._visual_threshold
+
+        ratio = 0.0
+        if before is not None and after is not None:
+            ratio = new_content_ratio(before.elements, after.elements)
+
+        before_bounds = (
+            scroll_container_bounds(before.elements) if before is not None else None
+        )
+        after_bounds = (
+            scroll_container_bounds(after.elements) if after is not None else None
+        )
+        before_bottom = before_bounds[3] if before_bounds is not None else None
+        after_bottom = after_bounds[3] if after_bounds is not None else None
+        shrank = (
+            before_bottom is not None
+            and after_bottom is not None
+            and after_bottom < before_bottom
+        )
+        return ScreenChange(
+            moved=moved,
+            distance=distance,
+            new_content_ratio=ratio,
+            container_shrank=shrank,
+            before_container_bottom=before_bottom,
+            after_container_bottom=after_bottom,
         )
 
     def wait_for(

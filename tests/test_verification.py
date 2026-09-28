@@ -6,7 +6,7 @@ from agentpro.agent_runner import RecordingBridgeClient
 from agentpro.budgets import LoopGuard
 from agentpro.llm_planner import FakeLLMClient, LLMError
 from agentpro.memory import MemoryStore
-from agentpro.screen import ScreenReader, ScreenSnapshot
+from agentpro.screen import ScreenChange, ScreenReader, ScreenSnapshot
 from agentpro.verification import (
     ActionVerification,
     ActionVerifier,
@@ -16,7 +16,7 @@ from agentpro.verification import (
     ProgressVerifier,
 )
 
-def _editable_tree(text: str) -> dict:
+def _editable_tree(text: str, top: int = 200) -> dict:
     return {
         "class": "android.widget.FrameLayout",
         "package": "com.example.app",
@@ -24,11 +24,44 @@ def _editable_tree(text: str) -> dict:
             {
                 "class": "android.widget.EditText",
                 "text": text,
-                "bounds": "[100,200][900,300]",
+                "bounds": f"[100,{top}][900,{top + 100}]",
                 "editable": True,
                 "focused": True,
             }
         ],
+    }
+
+
+def _two_field_tree(
+    first: str,
+    second: str,
+    focus: int | str | None = 1,
+) -> dict:
+    """Two stacked editable fields, vertically separated and identically sized.
+
+    ``focus`` selects which field carries focus: an index, ``"both"``, or
+    ``None`` for neither.
+    """
+
+    def _field(text: str, top: int, index: int) -> dict:
+        if focus == "both":
+            focused = True
+        elif focus is None:
+            focused = False
+        else:
+            focused = index == focus
+        return {
+            "class": "android.widget.EditText",
+            "text": text,
+            "bounds": f"[100,{top}][900,{top + 100}]",
+            "editable": True,
+            "focused": focused,
+        }
+
+    return {
+        "class": "android.widget.FrameLayout",
+        "package": "com.example.app",
+        "children": [_field(first, 200, 0), _field(second, 400, 1)],
     }
 
 
@@ -112,7 +145,9 @@ class ActionVerifierTests(unittest.TestCase):
             RecordingBridgeClient(ui_root=_editable_tree("hello world"))
         )
         self.assertIs(
-            verifier.verify("type_text", {}, True, None, before, after),
+            verifier.verify(
+                "type_text", {"text": "world"}, True, None, before, after
+            ),
             ActionVerification.VERIFIED,
         )
 
@@ -130,7 +165,9 @@ class ActionVerifierTests(unittest.TestCase):
         before = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("hello")))
         after = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("hello")))
         self.assertIs(
-            verifier.verify("type_text", {}, True, None, before, after),
+            verifier.verify(
+                "type_text", {"text": "world"}, True, None, before, after
+            ),
             ActionVerification.PARTIAL,
         )
 
@@ -143,10 +180,19 @@ class ActionVerifierTests(unittest.TestCase):
             ActionVerification.VERIFIED,
         )
 
-    def test_erase_text_verified(self) -> None:
+    def test_erase_text_partial_while_field_not_empty(self) -> None:
         verifier = ActionVerifier()
         before = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("hello world")))
         after = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("hello")))
+        self.assertIs(
+            verifier.verify("erase_text", {}, True, None, before, after),
+            ActionVerification.PARTIAL,
+        )
+
+    def test_erase_text_verified_when_field_emptied(self) -> None:
+        verifier = ActionVerifier()
+        before = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("hello")))
+        after = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("")))
         self.assertIs(
             verifier.verify("erase_text", {}, True, None, before, after),
             ActionVerification.VERIFIED,
@@ -183,6 +229,220 @@ class ActionVerifierTests(unittest.TestCase):
                 "type_text", {"text": "zzz"}, True, None, before, after
             ),
             ActionVerification.PARTIAL,
+        )
+
+    def test_type_text_not_verified_when_text_sits_in_another_field(self) -> None:
+        """Regression: the write missed, but the text existed elsewhere.
+
+        The old rule searched every editable field on screen, so an unrelated
+        field that already contained the typed string produced VERIFIED for a
+        write that never happened.
+        """
+        verifier = ActionVerifier()
+        before = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("12345", "", focus=1))
+        )
+        after = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("12345", "", focus=1))
+        )
+        self.assertIs(
+            verifier.verify(
+                "type_text", {"text": "12345"}, True, None, before, after
+            ),
+            ActionVerification.PARTIAL,
+        )
+
+    def test_type_text_verified_in_target_field_only(self) -> None:
+        verifier = ActionVerifier()
+        before = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("ali@mail.com", "", focus=1))
+        )
+        after = _snapshot(
+            RecordingBridgeClient(
+                ui_root=_two_field_tree("ali@mail.com", "12345", focus=1)
+            )
+        )
+        self.assertIs(
+            verifier.verify(
+                "type_text", {"text": "12345"}, True, None, before, after
+            ),
+            ActionVerification.VERIFIED,
+        )
+
+    def test_type_text_unknown_when_no_field_is_focused(self) -> None:
+        """Two editable fields and no focus: the target is undecidable."""
+        verifier = ActionVerifier()
+        before = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("aaa", "bbb", focus=None))
+        )
+        after = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("aaa", "ccc", focus=None))
+        )
+        self.assertIs(
+            verifier.verify(
+                "type_text", {"text": "ccc"}, True, None, before, after
+            ),
+            ActionVerification.UNKNOWN,
+        )
+
+    def test_type_text_unknown_when_two_fields_share_focus(self) -> None:
+        verifier = ActionVerifier()
+        before = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("", "", focus="both"))
+        )
+        after = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("a", "b", focus="both"))
+        )
+        self.assertIs(
+            verifier.verify("type_text", {"text": "a"}, True, None, before, after),
+            ActionVerification.UNKNOWN,
+        )
+
+    def test_type_text_verified_when_keyboard_shifts_target(self) -> None:
+        """Measured case: the soft keyboard moved top by 873px, nothing else.
+
+        Matching on top alone would report UNKNOWN for a write that succeeded.
+        """
+        verifier = ActionVerifier()
+        before = _snapshot(
+            RecordingBridgeClient(ui_root=_editable_tree("hi", top=1889))
+        )
+        after = _snapshot(
+            RecordingBridgeClient(ui_root=_editable_tree("hi there", top=1016))
+        )
+        self.assertIs(
+            verifier.verify(
+                "type_text", {"text": "there"}, True, None, before, after
+            ),
+            ActionVerification.VERIFIED,
+        )
+
+    def test_type_text_unknown_when_same_shaped_field_appears(self) -> None:
+        """A new same-shaped field shifts every ordinal, so fail closed."""
+        verifier = ActionVerifier()
+        before = _snapshot(
+            RecordingBridgeClient(ui_root=_two_field_tree("a", "", focus=1))
+        )
+        after = _snapshot(
+            RecordingBridgeClient(ui_root=_three_field_tree("a", "b", "", focus=2))
+        )
+        self.assertIs(
+            verifier.verify("type_text", {"text": ""}, True, None, before, after),
+            ActionVerification.UNKNOWN,
+        )
+
+    def test_type_text_unknown_when_target_field_disappears(self) -> None:
+        verifier = ActionVerifier()
+        before = _snapshot(RecordingBridgeClient(ui_root=_editable_tree("hi")))
+        after = _snapshot(RecordingBridgeClient(ui_root=_clickable_tree("done")))
+        self.assertIs(
+            verifier.verify("type_text", {"text": "x"}, True, None, before, after),
+            ActionVerification.UNKNOWN,
+        )
+
+
+def _three_field_tree(
+    first: str,
+    second: str,
+    third: str,
+    focus: int | None = 2,
+) -> dict:
+    """Three identically shaped fields, used to shift the ordinal of a target."""
+    return {
+        "class": "android.widget.FrameLayout",
+        "package": "com.example.app",
+        "children": [
+            {
+                "class": "android.widget.EditText",
+                "text": text,
+                "bounds": f"[100,{200 + index * 200}][900,{300 + index * 200}]",
+                "editable": True,
+                "focused": index == focus,
+            }
+            for index, text in enumerate((first, second, third))
+        ],
+    }
+
+
+def _list_tree(items: tuple[str, ...] = ("A", "B", "C")) -> dict:
+    """A short list inside a scrollable container."""
+    return {
+        "class": "android.widget.FrameLayout",
+        "package": "com.example.app",
+        "scrollable": True,
+        "bounds": "[0,0][1080,1832]",
+        "children": [
+            {
+                "class": "android.widget.TextView",
+                "text": text,
+                "bounds": f"[0,{200 + i * 150}][1080,{300 + i * 150}]",
+            }
+            for i, text in enumerate(items)
+        ],
+    }
+
+
+class PixelChannelVerificationTests(unittest.TestCase):
+    """A swipe is only judged from the pixel channel when pixels were read.
+
+    Without this, an unchanged element tree reports UNKNOWN for every scroll
+    that keeps its nodes inside the fingerprint's 85px position buckets, which
+    is what let the agent keep swiping a list that had stopped responding.
+    """
+
+    @staticmethod
+    def _change(moved: bool | None) -> ScreenChange:
+        return ScreenChange(
+            moved=moved,
+            distance=0 if moved is False else (32 if moved else None),
+            new_content_ratio=0.0,
+            container_shrank=False,
+            before_container_bottom=1832,
+            after_container_bottom=1832,
+        )
+
+    def _verify(self, tool: str, visual: ScreenChange | None):
+        verifier = ActionVerifier()
+        snapshot = _snapshot(RecordingBridgeClient(ui_root=_list_tree()))
+        return verifier.verify(tool, {}, True, None, snapshot, snapshot, visual)
+
+    def test_swipe_verified_when_pixels_moved(self) -> None:
+        self.assertIs(
+            self._verify("swipe", self._change(True)),
+            ActionVerification.VERIFIED,
+        )
+
+    def test_swipe_failed_when_pixels_provably_did_not_move(self) -> None:
+        self.assertIs(
+            self._verify("swipe", self._change(False)),
+            ActionVerification.FAILED,
+        )
+
+    def test_swipe_unknown_when_pixels_unavailable(self) -> None:
+        self.assertIs(
+            self._verify("swipe", self._change(None)),
+            ActionVerification.UNKNOWN,
+        )
+
+    def test_swipe_unknown_without_visual_channel(self) -> None:
+        self.assertIs(
+            self._verify("swipe", None), ActionVerification.UNKNOWN
+        )
+
+    def test_tap_not_downgraded_by_still_screen(self) -> None:
+        """A tap that opens nothing is not evidence of a missed scroll."""
+        self.assertIs(
+            self._verify("tap", self._change(False)),
+            ActionVerification.UNKNOWN,
+        )
+
+    def test_changed_tree_overrides_pixel_channel(self) -> None:
+        verifier = ActionVerifier()
+        before = _snapshot(RecordingBridgeClient(ui_root=_list_tree()))
+        after = _snapshot(RecordingBridgeClient(ui_root=_list_tree(items=("B", "C", "D"))))
+        self.assertIs(
+            verifier.verify("swipe", {}, True, None, before, after, self._change(False)),
+            ActionVerification.VERIFIED,
         )
 
 
