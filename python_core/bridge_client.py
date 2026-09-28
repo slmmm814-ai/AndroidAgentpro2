@@ -49,7 +49,23 @@ class BridgeProtocolError(BridgeClientError):
 
 
 class BridgeRemoteError(BridgeClientError):
-    """Raised when the Bridge rejects a valid request."""
+    """Raised when the Bridge rejects a valid request.
+
+    ``error_code`` carries the device-side code (for example
+    ``PACKAGE_NOT_FOUND``) so callers can react to a specific failure instead
+    of parsing the human-readable message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.error_message = error_message
 
 
 @dataclass(frozen=True)
@@ -677,7 +693,9 @@ class BridgeClient:
 
             if response.error_code and response.error_message:
                 raise BridgeRemoteError(
-                    f"{response.error_code}: {response.error_message}"
+                    f"{response.error_code}: {response.error_message}",
+                    error_code=response.error_code,
+                    error_message=response.error_message,
                 )
 
             raise BridgeRemoteError(

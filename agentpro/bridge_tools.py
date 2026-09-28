@@ -22,10 +22,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from .models import ActionType
+from .mcp_client import DEFAULT_MCP_PREFIX
 from .screen import ScreenReader, summarize_screen
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .mcp_client import MCPClient
 
 
 class PermissionLevel(str, Enum):
@@ -36,6 +40,20 @@ class PermissionLevel(str, Enum):
 
 class ToolError(RuntimeError):
     """Raised for structural tool problems (registry, schema, dispatch)."""
+
+
+class _RemoteToolError(RuntimeError):
+    """Internal carrier for a device/tool failure code.
+
+    Raised by a tool when the device (or a resolver) rejected the call with a
+    meaningful code such as ``PACKAGE_NOT_FOUND``; the registry turns it into a
+    :class:`ToolResult` that keeps the code instead of a generic error.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -152,6 +170,7 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
         self._enabled: dict[str, bool] = {}
         self._hook: Callable[[Mapping[str, Any]], bool] | None = None
+        self._failures: dict[str, int] = {}
 
     def register(self, tool: Tool, *, enabled: bool = True) -> "ToolRegistry":
         if not isinstance(tool, Tool):
@@ -237,13 +256,58 @@ class ToolRegistry:
                     f"tool authorization hook failed: {exc}",
                 )
 
+        blocked = self.repeat_blocked(name, args)
+        if blocked is not None:
+            return ToolResult.error("REPEAT_BLOCKED", f"{name}: {blocked}")
+
         try:
-            return tool.execute(ctx, args)
+            result = tool.execute(ctx, args)
+        except _RemoteToolError as exc:
+            result = ToolResult.error(exc.code, exc.message)
         except Exception as exc:
-            return ToolResult.error(
-                "TOOL_EXECUTION_ERROR",
-                f"tool '{name}' failed: {exc}",
-            )
+            code = getattr(exc, "error_code", None) or "TOOL_EXECUTION_ERROR"
+            result = ToolResult.error(code, f"tool '{name}' failed: {exc}")
+
+        self._note_outcome(name, args, result)
+        return result
+
+    # -- repetition control ------------------------------------------------
+
+    #: An identical call is blocked once it has failed this many times. One
+    #: retry stays allowed (transient device errors happen), a second identical
+    #: failure is treated as a dead end and never sent to the device again.
+    REPEAT_FAILURE_LIMIT = 2
+
+    @staticmethod
+    def _call_key(name: str, args: Mapping[str, Any]) -> str:
+        try:
+            rendered = repr(sorted((str(k), repr(v)) for k, v in args.items()))
+        except TypeError:
+            rendered = repr(sorted(str(k) for k in args))
+        return f"{name}({rendered})"
+
+    def _note_outcome(
+        self,
+        name: str,
+        args: Mapping[str, Any],
+        result: ToolResult,
+    ) -> None:
+        key = self._call_key(name, args)
+        if result.success:
+            self._failures.pop(key, None)
+            return
+        self._failures[key] = self._failures.get(key, 0) + 1
+
+    def repeat_blocked(self, name: str, args: Mapping[str, Any]) -> str | None:
+        """Return the recorded error when an identical call is a dead end."""
+        key = self._call_key(name, args)
+        count = self._failures.get(key, 0)
+        if count < self.REPEAT_FAILURE_LIMIT:
+            return None
+        return (
+            f"identical call already failed {count} times; "
+            "pick a different tool, target, or screen instead of retrying it"
+        )
 
     def set_authorization_hook(
         self,
@@ -301,6 +365,18 @@ def _validate_schema(
                         f"argument '{key}' must be at least "
                         f"{spec['minLength']} characters"
                     )
+
+    groups = [g for g in (schema.get("anyOf") or []) if isinstance(g, Mapping)]
+    if groups:
+        satisfied = any(
+            all(key in args for key in group.get("required", [])) for group in groups
+        )
+        if not satisfied:
+            alternatives = " or ".join(
+                "/".join(f"'{key}'" for key in group.get("required", []))
+                for group in groups
+            )
+            errors.append(f"one of {alternatives} is required")
 
     return (not errors, errors)
 
@@ -799,25 +875,70 @@ class _OpenAppTool(Tool):
         super().__init__(
             ToolSpec(
                 name="open_app",
-                description="Launch an app by its Android package name",
+                description=(
+                    "Open an app. Pass 'package' for a known Android package "
+                    "name, or 'name' for the label shown on the launcher (for "
+                    "example 'Calculator'); with 'name' the launcher is read "
+                    "and the matching icon is tapped, so no package guessing "
+                    "is needed."
+                ),
                 schema={
                     "type": "object",
-                    "required": ["package"],
+                    "anyOf": [{"required": ["package"]}, {"required": ["name"]}],
                     "properties": {
                         "package": dict(
                             _T_STRING,
                             description="Android package name",
                             **{"minLength": 1, "maxLength": 256},
-                        )
+                        ),
+                        "name": dict(
+                            _T_STRING,
+                            description="app label as shown on the launcher",
+                            **{"minLength": 1, "maxLength": 128},
+                        ),
                     },
                 },
             )
         )
 
     def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
-        return ToolResult(
-            success=True, data=_resp_data(ctx.client.launch_app(str(args["package"])))
+        package = args.get("package")
+        name = args.get("name")
+        has_package = isinstance(package, str) and bool(package.strip())
+        has_name = isinstance(name, str) and bool(name.strip())
+
+        if not has_package and not has_name:
+            return ToolResult.error(
+                "INVALID_ARGS",
+                "open_app requires 'package' or 'name'",
+            )
+
+        if has_package:
+            try:
+                data = _resp_data(ctx.client.launch_app(str(package).strip()))
+            except Exception as exc:
+                code = getattr(exc, "error_code", None)
+                if not has_name or code != "PACKAGE_NOT_FOUND":
+                    raise
+                data = self._launch_by_label(ctx, str(name).strip())
+                data["package_attempt"] = str(package).strip()
+                return ToolResult(success=True, data=data)
+            data["resolved_by"] = "package"
+            return ToolResult(success=True, data=data)
+
+        return ToolResult(success=True, data=self._launch_by_label(ctx, str(name).strip()))
+
+    def _launch_by_label(self, ctx: ToolContext, name: str) -> dict[str, Any]:
+        from .app_resolver import AppResolutionError, LauncherAppResolver
+
+        resolver = LauncherAppResolver(
+            ctx.client,
+            settle_seconds=float(ctx.extra.get("launcher_settle_seconds", 1.2)),
         )
+        try:
+            return resolver.launch(name)
+        except AppResolutionError as exc:
+            raise _RemoteToolError(exc.code, exc.message) from exc
 
     def to_action_type(self) -> ActionType:
         return ActionType.OPEN_APP
@@ -1074,12 +1195,20 @@ class _ShellTool(_DangerTool):
         return ActionType.KEY_EVENT
 
 
-def build_default_registry(*, include_dangerous: bool = False) -> ToolRegistry:
+def build_default_registry(
+    *,
+    include_dangerous: bool = False,
+    mcp: "MCPClient | None" = None,
+    mcp_prefix: str = DEFAULT_MCP_PREFIX,
+) -> ToolRegistry:
     """Construct the standard tool registry.
 
     Dangerous tools (``shell``, ``install_apk``) are registered but **disabled**
     unless ``include_dangerous`` is set; even then they stay gated behind the
     registry authorization hook / permission level until explicitly enabled.
+
+    Passing ``mcp`` registers that server's tools as well (prefixed by
+    ``mcp_prefix``), so remote capabilities join the same planning loop.
     """
     registry = ToolRegistry()
     registry.register(_TapTool())
@@ -1109,6 +1238,11 @@ def build_default_registry(*, include_dangerous: bool = False) -> ToolRegistry:
     if not include_dangerous:
         registry.enable("install_apk", enabled=False)
         registry.enable("shell", enabled=False)
+
+    if mcp is not None:
+        from .mcp_tools import register_mcp_tools
+
+        register_mcp_tools(registry, mcp, prefix=mcp_prefix)
 
     return registry
 

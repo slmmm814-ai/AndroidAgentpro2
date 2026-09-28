@@ -191,6 +191,7 @@ class AutonomousAgent:
         owner_confirmation_handler: Callable[[AgentAction, str], OwnerConfirmation | None] | None = None,
         confirmation_handler: Callable[[AgentAction], bool] | None = None,
         model_manager: Any = None,
+        use_mcp: bool = True,
     ) -> None:
         if not hasattr(client, "ui_dump") or not hasattr(client, "tap"):
             raise TypeError("client must implement the bridge surface")
@@ -216,6 +217,11 @@ class AutonomousAgent:
         )
 
         self.registry = registry or build_default_registry()
+        self.mcp: Any = None
+        if registry is None and use_mcp:
+            from .mcp_tools import attach_mcp_from_env
+
+            self.mcp = attach_mcp_from_env(self.registry)
         self.memory = memory or MemoryStore()
         screen = screen_reader or ScreenReader(
             client,
@@ -499,6 +505,7 @@ class AutonomousAgent:
 
                 self._fsm.register_action()
                 self.tool_context.snapshot = snapshot
+                visual_before = self.screen_reader.capture_visual()
                 result = self.registry.execute(
                     decision.tool,
                     self.tool_context,
@@ -554,6 +561,11 @@ class AutonomousAgent:
                     result.error_code,
                     snapshot,
                     after,
+                    self.screen_reader.measure_change(
+                        snapshot,
+                        after,
+                        previous_visual=visual_before,
+                    ),
                 )
                 self._t(
                     "v2_action_verified",

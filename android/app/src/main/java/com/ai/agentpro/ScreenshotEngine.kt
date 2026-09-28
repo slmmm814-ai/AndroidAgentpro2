@@ -20,6 +20,7 @@ class ScreenshotEngine(
         private const val CAPTURE_TIMEOUT_MS = 8_000L
         private const val JPEG_QUALITY = 85
         private const val MIN_CAPTURE_INTERVAL_MS = 250L
+        private const val VISUAL_HASH_SIZE = 16
 
         private const val ERROR_API_UNSUPPORTED = "SCREENSHOT_API_UNSUPPORTED"
         private const val ERROR_TIMEOUT = "SCREENSHOT_TIMEOUT"
@@ -52,15 +53,75 @@ class ScreenshotEngine(
     @Volatile
     private var lastCaptureStartedAt = 0L
 
-    fun captureDefaultDisplay(): CaptureResult {
+    /**
+     * Outcome of grabbing the raw frame.
+     *
+     * Exactly one of [bitmap] / [failure] is set. The caller owns [bitmap] and
+     * must recycle it.
+     */
+    private class RawCapture(
+        val bitmap: Bitmap?,
+        val failure: CaptureResult?
+    )
+
+    fun captureVisualHash(size: Int = VISUAL_HASH_SIZE): VisualHashResult {
+        val raw = captureRawFrame()
+
+        val failure = raw.failure
+
+        if (failure != null) {
+            return VisualHashResult.failure(
+                failure.operationId,
+                failure.code ?: ERROR_CAPTURE_FAILED,
+                failure.message ?: "Visual hash capture failed"
+            )
+        }
+
+        val frame = raw.bitmap
+
+        if (frame == null) {
+            return VisualHashResult.failure(
+                0L,
+                ERROR_EMPTY_RESULT,
+                "Visual hash capture produced no frame"
+            )
+        }
+
+        val operationId = operationCounter.get()
+
+        return try {
+            VisualHashResult.success(
+                operationId,
+                VisualHash.compute(frame, size)
+            )
+        } catch (exception: Exception) {
+            Log.e(
+                TAG,
+                "Visual hash failed; operation=$operationId",
+                exception
+            )
+
+            VisualHashResult.failure(
+                operationId,
+                ERROR_ENCODING_FAILED,
+                exception.message ?: exception.javaClass.simpleName
+            )
+        } finally {
+            frame.recycle()
+        }
+    }
+
+    private fun captureRawFrame(): RawCapture {
         val operationId = operationCounter.incrementAndGet()
-        val startedAt = SystemClock.elapsedRealtime()
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return CaptureResult.failure(
-                operationId,
-                ERROR_API_UNSUPPORTED,
-                "Accessibility screenshot requires Android 11/API 30 or newer"
+            return RawCapture(
+                null,
+                CaptureResult.failure(
+                    operationId,
+                    ERROR_API_UNSUPPORTED,
+                    "Accessibility screenshot requires Android 11/API 30 or newer"
+                )
             )
         }
 
@@ -76,10 +137,13 @@ class ScreenshotEngine(
                     "Screenshot rate limited; operation=$operationId"
                 )
 
-                return CaptureResult.failure(
-                    operationId,
-                    ERROR_CAPTURE_FAILED,
-                    "Screenshot requested too frequently"
+                return RawCapture(
+                    null,
+                    CaptureResult.failure(
+                        operationId,
+                        ERROR_CAPTURE_FAILED,
+                        "Screenshot requested too frequently"
+                    )
                 )
             }
         }
@@ -164,10 +228,13 @@ class ScreenshotEngine(
                 exception
             )
 
-            return CaptureResult.failure(
-                operationId,
-                ERROR_CAPTURE_FAILED,
-                exception.message ?: exception.javaClass.simpleName
+            return RawCapture(
+                null,
+                CaptureResult.failure(
+                    operationId,
+                    ERROR_CAPTURE_FAILED,
+                    exception.message ?: exception.javaClass.simpleName
+                )
             )
         }
 
@@ -179,10 +246,13 @@ class ScreenshotEngine(
         } catch (exception: InterruptedException) {
             Thread.currentThread().interrupt()
 
-            return CaptureResult.failure(
-                operationId,
-                ERROR_TIMEOUT,
-                "Screenshot wait was interrupted"
+            return RawCapture(
+                null,
+                CaptureResult.failure(
+                    operationId,
+                    ERROR_TIMEOUT,
+                    "Screenshot wait was interrupted"
+                )
             )
         }
 
@@ -192,20 +262,58 @@ class ScreenshotEngine(
                 "Screenshot timed out; operation=$operationId"
             )
 
-            return CaptureResult.failure(
-                operationId,
-                ERROR_TIMEOUT,
-                "Screenshot callback timed out after ${CAPTURE_TIMEOUT_MS}ms"
+            return RawCapture(
+                null,
+                CaptureResult.failure(
+                    operationId,
+                    ERROR_TIMEOUT,
+                    "Screenshot callback timed out after ${CAPTURE_TIMEOUT_MS}ms"
+                )
             )
         }
 
         val capturedBitmap = bitmap
 
         if (capturedBitmap == null) {
+            return RawCapture(
+                null,
+                CaptureResult.failure(
+                    operationId,
+                    ERROR_EMPTY_RESULT,
+                    "Screenshot callback completed without a bitmap; systemError=$failureCode"
+                )
+            )
+        }
+
+        return RawCapture(capturedBitmap, null)
+    }
+
+    fun captureDefaultDisplay(): CaptureResult {
+        val operationId = operationCounter.incrementAndGet()
+        val startedAt = SystemClock.elapsedRealtime()
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return CaptureResult.failure(
+                operationId,
+                ERROR_API_UNSUPPORTED,
+                "Accessibility screenshot requires Android 11/API 30 or newer"
+            )
+        }
+
+        val raw = captureRawFrame()
+        val failure = raw.failure
+
+        if (failure != null) {
+            return failure
+        }
+
+        val capturedBitmap = raw.bitmap
+
+        if (capturedBitmap == null) {
             return CaptureResult.failure(
                 operationId,
                 ERROR_EMPTY_RESULT,
-                "Screenshot callback completed without a bitmap; systemError=$failureCode"
+                "Screenshot capture produced no frame"
             )
         }
 

@@ -56,6 +56,11 @@ Rules:
 - Use tap_element with the [N] index (or its text) from the summary to tap \
 an element by identity; use the raw tap coordinates only when no element \
 matches.
+- To open an app: pass open_app with "name" (the label you see on the \
+launcher, e.g. "Calculator"). Only pass "package" if that exact package name \
+is already known from this session; never invent a package name.
+- Never repeat a call that already failed with the same arguments. After a \
+failure, change approach: different target, scroll, search, or another tool.
 - Use type_text only when an editable (focused) field is present; use \
 erase_text (or clear_text) to empty a field before typing into it.
 - Use wait_for_text / wait_for_screen_stable instead of guess-and-tap when a \

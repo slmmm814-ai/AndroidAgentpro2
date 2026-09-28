@@ -20,7 +20,7 @@ from .budgets import LoopGuard
 from .llm_planner import LLMClient
 from .memory import MemoryStore
 from .models import GoalResult
-from .screen import ScreenSnapshot
+from .screen import InteractiveElement, ScreenChange, ScreenSnapshot
 
 
 class ActionVerification(str, Enum):
@@ -37,19 +37,111 @@ _NAV_TOOLS = frozenset(
 _READ_TOOLS = frozenset(
     {"dump_ui", "screenshot", "get_window_info", "wait", "wait_for_text", "wait_for_screen_stable"}
 )
+_GESTURE_SCROLL_TOOLS = frozenset({"swipe", "scroll"})
 
 
-def _editable_texts(snapshot: ScreenSnapshot | None) -> list[str]:
-    """Sorted editable-field contents for deterministic text checks."""
+def _target_editable(snapshot: ScreenSnapshot | None) -> InteractiveElement | None:
+    """The single editable node that also holds focus.
+
+    Returns ``None`` when there is no such node, or when more than one node
+    qualifies. Both cases are ambiguous: with the keyboard dismissed a form
+    can expose several editable fields and none of them focused, and there is
+    no evidence for which one was meant. Returning ``None`` makes the caller
+    fail closed with ``UNKNOWN`` instead of guessing.
+    """
     if snapshot is None:
-        return []
-    return [
-        (el.text or "")
-        for el in sorted(
-            snapshot.find(editable=True),
-            key=lambda el: (el.top, el.left, el.node_index),
-        )
-    ]
+        return None
+    candidates = snapshot.find(editable=True, focused=True)
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _shape_key(element: InteractiveElement) -> tuple[int, int, int]:
+    return (element.left, element.right, element.bottom - element.top)
+
+
+def _relocate_target(
+    target: InteractiveElement,
+    snapshot: ScreenSnapshot | None,
+    *,
+    ordinal: int,
+    group_size: int,
+) -> InteractiveElement | None:
+    """Find ``target`` again in a later snapshot.
+
+    Primary key is ``left``, ``right`` and height, deliberately ignoring
+    ``top``: showing the soft keyboard shifts only ``top`` (measured
+    1889 -> 1016 with left/right/height unchanged), so ``top`` is unusable as a
+    key while a horizontal or size change means the field was replaced rather
+    than typed into.
+
+    Stacked form fields routinely share the same width and height, so the
+    shape alone can match several nodes. The target's ordinal position within
+    its own shape group carries the rest, and the group size is required to be
+    unchanged; a form that added or removed a same-shaped field returns
+    ``None`` rather than shifting every ordinal onto the wrong field.
+    """
+    if snapshot is None:
+        return None
+    group = [el for el in snapshot.find(editable=True) if _shape_key(el) == _shape_key(target)]
+    if len(group) != group_size or ordinal >= len(group):
+        return None
+    return group[ordinal]
+
+
+def _verify_text_tool(
+    tool: str,
+    args: Mapping[str, Any],
+    before: ScreenSnapshot | None,
+    after: ScreenSnapshot | None,
+) -> ActionVerification:
+    """Verify a text tool against the *targeted* field only.
+
+    The previous implementation compared the typed text against every editable
+    field on screen and also accepted any growth in the total character count.
+    Both are false positives: text already present in an unrelated field, or a
+    change in a different field, were reported as ``VERIFIED`` for a write that
+    never landed in the intended field.
+    """
+    if before is None:
+        return ActionVerification.UNKNOWN
+    if not before.find(editable=True) and (
+        after is None or not after.find(editable=True)
+    ):
+        return ActionVerification.NO_OP
+
+    target_before = _target_editable(before)
+    if target_before is None:
+        return ActionVerification.UNKNOWN
+
+    key = _shape_key(target_before)
+    group = [el for el in before.find(editable=True) if _shape_key(el) == key]
+    ordinal = group.index(target_before)
+
+    target_after = _relocate_target(
+        target_before,
+        after,
+        ordinal=ordinal,
+        group_size=len(group),
+    )
+    if target_after is None:
+        return ActionVerification.UNKNOWN
+
+    text_after = target_after.text or ""
+
+    if tool == "type_text":
+        typed = args.get("text")
+        if not isinstance(typed, str) or not typed:
+            return ActionVerification.UNKNOWN
+        if typed in text_after:
+            return ActionVerification.VERIFIED
+        return ActionVerification.PARTIAL
+
+    # clear_text / erase_text: success means the field really became empty.
+    if text_after == "":
+        return ActionVerification.VERIFIED
+    return ActionVerification.PARTIAL
 
 
 class ActionVerifier:
@@ -63,6 +155,7 @@ class ActionVerifier:
         result_error: str | None,
         before: ScreenSnapshot | None,
         after: ScreenSnapshot | None,
+        visual: ScreenChange | None = None,
     ) -> ActionVerification:
         if not result_success:
             return ActionVerification.FAILED
@@ -82,42 +175,25 @@ class ActionVerifier:
             return ActionVerification.PARTIAL
 
         if tool in {"type_text", "clear_text", "erase_text"}:
-            editables_before = (
-                len(before.find(editable=True)) if before is not None else 0
-            )
-            editables_after = (
-                len(after.find(editable=True)) if after is not None else 0
-            )
-            if editables_before == 0 and editables_after == 0:
-                return ActionVerification.NO_OP
-
-            texts_before = _editable_texts(before)
-            texts_after = _editable_texts(after)
-            total_before = sum(len(text) for text in texts_before)
-            total_after = sum(len(text) for text in texts_after)
-
-            if tool == "type_text":
-                typed = args.get("text")
-                if isinstance(typed, str) and typed and any(
-                    typed in text for text in texts_after
-                ):
-                    return ActionVerification.VERIFIED
-                if total_after > total_before:
-                    return ActionVerification.VERIFIED
-                return ActionVerification.PARTIAL
-
-            # clear_text / erase_text: the targeted content must shrink
-            # or disappear, not merely change.
-            if total_after < total_before or (
-                total_before > 0 and total_after == 0
-            ):
-                return ActionVerification.VERIFIED
-            return ActionVerification.PARTIAL
+            return _verify_text_tool(tool, args, before, after)
 
         # tap / long_press / swipe / scroll: expect the tree to change at least
         # somewhere; otherwise the action likely missed its target.
         if after_fp is not None and after_fp != before_fp:
             return ActionVerification.VERIFIED
+
+        # An unchanged tree leaves a gesture unresolved, because the element
+        # fingerprint buckets positions and cannot see a scroll that keeps every
+        # node inside its bucket. The pixel channel settles it: measured
+        # distances were 0 for an idle screen, 32 for a real scroll. It only
+        # ever adds a verdict here, never overrides tree evidence above.
+        if tool in _GESTURE_SCROLL_TOOLS and visual is not None:
+            if visual.moved is True:
+                return ActionVerification.VERIFIED
+            if visual.moved is False:
+                return ActionVerification.FAILED
+            return ActionVerification.UNKNOWN
+
         return ActionVerification.UNKNOWN
 
 
