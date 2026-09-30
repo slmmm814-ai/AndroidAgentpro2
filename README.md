@@ -8,8 +8,11 @@ effect, recovers when stuck, and verifies the goal before reporting success —
 all behind layered budgets, a kill switch, and an owner-confirmation gate.
 
 > **Status:** Security scaffold (Phases 0–6) + full **autonomy v2 loop** are
-> implemented and tested (412 unit tests green). The recommended engine is the
-> v2 `AutonomousAgent` (default in the CLI); `--legacy` keeps the v1 runner.
+> implemented and tested, and the **APEX** reliability layer is in place
+> (814 unit tests green). The recommended engine is the v2 `AutonomousAgent`
+> (default in the CLI); `--legacy` keeps the v1 runner. APEX adds deterministic
+> physics, an app-state map, tree-first grounding, and tiered models on top —
+> see [docs/APEX.md](docs/APEX.md).
 > Connect a real device + an LLM API key to drive it for real.
 
 ---

@@ -69,12 +69,13 @@ class FastDriver:
         self,
         client: BridgeClient | None = None,
         *,
+        screen_reader: ScreenReader | None = None,
         snapshot_ttl: float = DEFAULT_SNAPSHOT_TTL,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         wait_timeout: float = DEFAULT_WAIT_TIMEOUT,
     ) -> None:
         self._client = client or BridgeClient()
-        self._reader = ScreenReader(self._client)
+        self._reader = screen_reader or ScreenReader(self._client)
         self._snapshot_ttl = max(0.0, snapshot_ttl)
         self._poll_interval = max(0.01, poll_interval)
         self._wait_timeout = max(0.5, wait_timeout)

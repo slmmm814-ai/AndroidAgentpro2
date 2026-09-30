@@ -94,6 +94,7 @@ class ToolContext:
     client: Any
     screen_reader: ScreenReader | None = None
     snapshot: Any = None
+    fast: Any = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def last_screenshot_dims(self) -> tuple[int, int] | None:
@@ -1060,6 +1061,16 @@ class _WaitForTextTool(Tool):
         )
 
     def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        # Prefer the FastDriver path: it polls get_window/ui_dump directly
+        # and avoids the fixed sleeps inside ScreenReader.wait_for_text.
+        fast = getattr(ctx, "fast", None)
+        if fast is not None:
+            ok = fast.smart_wait(
+                text=str(args["text"]),
+                timeout=float(args.get("timeout_s", 15.0)),
+            )
+            return ToolResult.ok(found=ok)
+
         if ctx.screen_reader is None:
             return ToolResult.error(
                 "NO_SCREEN_READER",

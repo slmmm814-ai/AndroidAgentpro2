@@ -172,6 +172,9 @@ class BridgeClient:
     ANDROID_AGENT_PRO_TOKEN environment variable.
     """
 
+    # Mirrors ScreenshotEngine.MIN_CAPTURE_INTERVAL_MS on the device.
+    SCREENSHOT_MIN_INTERVAL_S = 0.3
+
     def __init__(
         self,
         token: str | None = None,
@@ -301,6 +304,55 @@ class BridgeClient:
 
     def ui_dump(self) -> BridgeResponse:
         return self.command("ui_dump")
+
+    def screenshot(self, *, retries: int = 2) -> BridgeResponse:
+        """Capture the screen; the response carries a base64 PNG.
+
+        The device refuses captures closer together than 250 ms
+        (``ScreenshotEngine.MIN_CAPTURE_INTERVAL_MS``). Rather than surface
+        that as an error, wait out the interval and retry, because a caller
+        asking for two screenshots in a row wants both frames.
+        """
+        import time
+
+        attempts = max(0, int(retries)) + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                response = self.command("screenshot")
+            except BridgeRemoteError as exc:
+                last_error = exc
+                if "too frequently" not in str(exc) or attempt == attempts - 1:
+                    raise
+                time.sleep(self.SCREENSHOT_MIN_INTERVAL_S)
+                continue
+            if response.ok:
+                return response
+            if (
+                "too frequently" not in (response.error_message or "")
+                or attempt == attempts - 1
+            ):
+                return response
+            time.sleep(self.SCREENSHOT_MIN_INTERVAL_S)
+        raise BridgeRemoteError(f"screenshot failed: {last_error}")
+
+    def screen_size(self) -> tuple[int, int]:
+        """Return the real display size, falling back to a sane phone default.
+
+        Deriving the size from UI-tree bounds is wrong: the tree only covers
+        the content area, so the bottom of the last element sits well above the
+        real bottom edge and every scroll distance comes out short.
+        """
+        response = self.get_window()
+        data = response.data or {}
+        width = data.get("width") or data.get("w")
+        height = data.get("height") or data.get("h")
+        try:
+            if width and height and int(width) > 0 and int(height) > 0:
+                return (int(width), int(height))
+        except (TypeError, ValueError):
+            pass
+        return (1080, 2400)
 
     def tap(self, x: float, y: float) -> BridgeResponse:
         if not isinstance(x, (int, float)) or isinstance(x, bool):

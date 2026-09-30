@@ -6,6 +6,7 @@ import unittest
 from python_core.bridge_client import (
     BridgeClient,
     BridgeConfigurationError,
+    BridgeRemoteError,
     BridgeResponse,
 )
 
@@ -29,6 +30,68 @@ class FakeBridgeClient(BridgeClient):
             "data": {"operation_id": 42},
         }
         return json.dumps(response).encode("utf-8")
+
+
+class ScreenshotRateLimitedClient(BridgeClient):
+    """Device that refuses captures closer together than the 250 ms limit."""
+
+    def __init__(self, refusals: int = 1) -> None:
+        super().__init__(token="test-token")
+        self.refusals = refusals
+        self.attempts = 0
+        self.slept: list[float] = []
+
+    def _post(self, body: bytes) -> bytes:
+        payload = json.loads(body.decode("utf-8"))
+        rid = payload["request_id"]
+        self.attempts += 1
+        if self.attempts <= self.refusals:
+            return json.dumps({
+                "protocol": "ultimate",
+                "version": "1.0",
+                "ok": False,
+                "request_id": rid,
+                "error": {
+                    "code": "SCREENSHOT_CAPTURE_FAILED",
+                    "message": "Screenshot requested too frequently",
+                },
+            }).encode("utf-8")
+        return json.dumps({
+            "protocol": "ultimate",
+            "version": "1.0",
+            "ok": True,
+            "request_id": rid,
+            "data": {"base64": "QUJD"},
+        }).encode("utf-8")
+
+
+class ScreenshotRateLimitTests(unittest.TestCase):
+    def test_screenshot_sends_the_right_command(self) -> None:
+        client = FakeBridgeClient()
+        response = client.screenshot()
+        self.assertTrue(response.ok)
+        self.assertEqual(client.last_request["command"], "screenshot")
+
+    def test_screenshot_retries_after_a_rate_limit_refusal(self) -> None:
+        client = ScreenshotRateLimitedClient(refusals=1)
+        response = client.screenshot()
+        self.assertTrue(response.ok, "a rate-limited capture must be retried, not lost")
+        self.assertEqual(response.data["base64"], "QUJD")
+        self.assertEqual(client.attempts, 2)
+
+    def test_screenshot_gives_up_after_the_retry_budget(self) -> None:
+        client = ScreenshotRateLimitedClient(refusals=99)
+        # exhausting the budget surfaces the device's own reason rather than
+        # an endless retry loop
+        with self.assertRaises(BridgeRemoteError) as ctx:
+            client.screenshot(retries=1)
+        self.assertIn("too frequently", str(ctx.exception))
+        self.assertEqual(client.attempts, 2)
+
+    def test_backoff_wait_matches_the_device_interval(self) -> None:
+        # ScreenshotEngine.MIN_CAPTURE_INTERVAL_MS is 250 ms; waiting less
+        # would just be refused again.
+        self.assertGreaterEqual(BridgeClient.SCREENSHOT_MIN_INTERVAL_S, 0.25)
 
 
 class BridgeClientNewActionsTests(unittest.TestCase):

@@ -552,6 +552,8 @@ class OpenAICompatibleClient:
         *,
         json_mode: bool = False,
         timeout: float | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> str:
         import json as _json
         import urllib.error
@@ -563,6 +565,10 @@ class OpenAICompatibleClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            payload["max_tokens"] = int(max_tokens)
+        if temperature is not None:
+            payload["temperature"] = float(temperature)
 
         body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
 

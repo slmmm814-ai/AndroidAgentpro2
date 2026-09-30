@@ -4,3 +4,7 @@ __pycache__/
 venv/
 .env
 *.log
+
+# local tooling artifacts, never part of the project
+config.json
+.ofish.upload.*

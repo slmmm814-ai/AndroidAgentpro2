@@ -45,6 +45,7 @@ from .budgets import (
     signature_for,
 )
 from .fsm import AgentFSM, FSMLimits, StateLimitExceededError
+from .fast_driver import FastDriver
 from .llm_planner import LLMClient
 from .memory import MemoryStore
 from .models import (
@@ -297,6 +298,7 @@ class AutonomousAgent:
         self.tool_context = ToolContext(
             client=client,
             screen_reader=screen,
+            fast=FastDriver(client, screen_reader=screen),
         )
         self.planner = planner or SubgoalPlanner(
             self._mm,
