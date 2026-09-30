@@ -137,6 +137,9 @@ class ApexAgent:
         max_steps: int = 60,
         max_repeat: int = 3,
         kill_file: str | None = None,
+        expect_package: str | None = None,
+        scroll_flings: int = 8,
+        scroll_deadline_seconds: float = 25.0,
     ) -> None:
         self._driver = driver
         self._models = models
@@ -149,6 +152,25 @@ class ApexAgent:
         # targets already tapped without effect: retrying the same coordinate
         # just hammers a dead widget, so they are skipped in favour of scrolling
         self._failed_targets: set[str] = set()
+        #: Actions already executed on the current screen. Without this the
+        #: planner re-proposes the same tap every step and the loop spins
+        #: until the repeat guard stops it, because a fresh prompt with the
+        #: same screen invites the same answer.
+        self._planner_tried: set[str] = set()
+        #: packages seen that are not the app under test
+        self._wrong_app_seen: set[str | None] = set()
+        self._last_fingerprint: str | None = None
+        #: The app this run is supposed to stay inside. Verification used to
+        #: accept a screen that merely *contained* the target text, and on a
+        #: live run the goal string was sitting in the terminal title bar of
+        #: the very process driving the phone — so leaving the app under test
+        #: produced a confident, completely fake success.
+        self.expect_package = expect_package
+        # Bounds on one deterministic scroll search. A feed that keeps
+        # producing content never reaches a stable fingerprint, so an
+        # unbounded fling loop is not "careful", it is stuck.
+        self.scroll_flings = max(1, scroll_flings)
+        self.scroll_deadline_seconds = float(scroll_deadline_seconds)
 
     # -- safety ------------------------------------------------------------- #
 
@@ -190,6 +212,41 @@ class ApexAgent:
         state = self._driver.snapshot()
         return str(state.get("fingerprint") or "unknown")
 
+    def _left_expected_app(self, package: str | None = None) -> bool:
+        """True when the screen is no longer the app this run is driving.
+
+        A run that wanders out of the app under test cannot claim success, no
+        matter what the text happens to say. On a live device the goal string
+        was visible in the terminal that was driving the phone, so a
+        text-only check happily "verified" a Termux window as a finished
+        Instagram task.
+
+        Recording the step is idempotent per screen: the loop calls this every
+        iteration, and a single wrong_app step is the useful signal.
+        """
+        if not self.expect_package:
+            return False
+        if package is None:
+            package = self._driver.snapshot().get("package")
+        if package == self.expect_package:
+            return False
+        if package not in self._wrong_app_seen:
+            self._wrong_app_seen.add(package)
+            self.steps.append(
+                StepRecord(
+                    index=len(self.steps),
+                    action="app-guard",
+                    detail=(
+                        f"left {self.expect_package}: now showing {package!r}, "
+                        "so the goal cannot be verified here"
+                    ),
+                    tier="none",
+                    seconds=0.0,
+                    result="wrong_app",
+                )
+            )
+        return True
+
     def _goal_reached(
         self,
         goal: str,
@@ -206,6 +263,12 @@ class ApexAgent:
         """
         if fingerprint == previous:
             # the screen did not react: the tap was a no-op
+            return False
+
+        # The screen must still be the app this run is driving, and this is
+        # checked *before* the no-op test: leaving the app is not a tap that
+        # failed to land, it is the run leaving its own sandbox.
+        if self._left_expected_app():
             return False
 
         state = self._driver.snapshot()
@@ -270,6 +333,22 @@ class ApexAgent:
                 report.reason = f"stuck: screen seen {repeats}x"
                 break
 
+            # Stop the moment the phone leaves the app under test. Without
+            # this the loop keeps planning and flinging against whatever else
+            # is on screen, which is how a live run burned 41 flings inside
+            # the terminal that was driving it.
+            if self._left_expected_app(package):
+                report.reason = (
+                    f"left the app under test {self.expect_package!r}: "
+                    f"phone is showing {package!r}"
+                )
+                break
+
+            if fingerprint != self._last_fingerprint:
+                # a new screen makes previously-tried actions irrelevant
+                self._planner_tried.clear()
+                self._last_fingerprint = fingerprint
+
             self.map.observe(
                 fingerprint,
                 package=package,
@@ -332,8 +411,32 @@ class ApexAgent:
                 and not self.map.reached_bottom(fingerprint)
             ):
                 t0 = time.monotonic()
-                scroll_result = self._driver.physics().scroll_to_text(target)
+                scroll_result = self._driver.physics().scroll_to_text(
+                    target, max_flings=self.scroll_flings
+                )
                 flings += scroll_result.flings
+                if scroll_result.duration_seconds > self.scroll_deadline_seconds:
+                    # A home feed never settles: it keeps producing fresh
+                    # posts, so flinging "until the text appears" can spend
+                    # minutes moving through a screen that was never going to
+                    # contain it. Time-box the search and let the planner
+                    # decide what to do next.
+                    self._failed_targets.add(target)
+                    self.steps.append(
+                        StepRecord(
+                            index=index,
+                            action="scroll",
+                            detail=(
+                                f"gave up scrolling for {target!r} after "
+                                f"{scroll_result.duration_seconds:.0f}s / "
+                                f"{scroll_result.flings} flings"
+                            ),
+                            tier="none",
+                            seconds=time.monotonic() - t0,
+                            result="scroll_timeout",
+                        )
+                    )
+                    continue
                 self.map.record_scroll(
                     "down",
                     moved=scroll_result.moved,
@@ -394,7 +497,14 @@ class ApexAgent:
 
             # --- rule 3: ask the planner (big model) what to do ----------
             t0 = time.monotonic()
-            user = _build_planner_prompt(goal, package, list(texts), self.map, repeats)
+            user = _build_planner_prompt(
+                goal,
+                package,
+                list(texts),
+                self.map,
+                repeats,
+                tried=sorted(self._planner_tried),
+            )
             try:
                 answer = self._models.ask("plan", system, user)
                 outcome = "planned"
@@ -459,6 +569,15 @@ class ApexAgent:
                                 taps += 1
                                 outcome = "tapped_by_label"
                 elif kind in ("done", "finish", "success"):
+                    # The planner's word is not proof, and neither is the text
+                    # on screen unless we are still inside the app being driven.
+                    if self._left_expected_app(package):
+                        report.reason = (
+                            f"planner reported done but the phone left "
+                            f"{self.expect_package!r} (now {package!r})"
+                        )
+                        outcome = "done_rejected"
+                        break
                     if self._ask_verifier(goal, fingerprint, [str(t).lower() for t in texts]):
                         report.success = True
                         report.reason = "planner reported done and the verifier agreed"
@@ -466,6 +585,12 @@ class ApexAgent:
                     outcome = "done_rejected"
                 else:
                     outcome = "unsupported_action"
+
+                # Remember what was actually done, so the next prompt can ask
+                # for something different instead of repeating this action.
+                if outcome not in ("unparsable", "unsupported_action"):
+                    detail = str(action.get("label") or action.get("text") or "")
+                    self._planner_tried.add(f"{kind}:{detail or 'x,y'}")
 
             self.steps.append(
                 StepRecord(
@@ -547,7 +672,9 @@ def _parse_action(answer: str) -> dict[str, Any] | None:
 _TARGET_FILLER = frozenset(
     {
         "the", "a", "an", "item", "row", "page", "screen", "option", "setting",
+        "account", "profile", "user", "contact", "chat",
         "صفحة", "شاشة", "العنصر", "إعداد", "اعداد", "خيار", "صف", "القسم",
+        "الحساب", "حساب", "الملف", "ملف", "المستخدم", "مستخدم", "الدردشة",
     }
 )
 
@@ -567,11 +694,23 @@ def _extract_target(goal: str) -> str | None:
     if not goal:
         return None
     text = goal.strip()
+
+    # A goal is often several instructions: "ابحث عن الحساب serveai ثم افتح
+    # صفحته". The thing to look for on the current screen is the *last*
+    # instruction's object, because the earlier steps are what got the agent
+    # here. Splitting on a coordinating word keeps the trailing target and
+    # discards the clause that described how to get there.
+    for separator in (" ثم ", " وثم ", "ثم ", " and then ", " then "):
+        if separator in text:
+            text = text.rsplit(separator, 1)[1]
+            break
+
     # drop leading instruction verbs, in either language
     verbs = (
         "open the ", "open ", "go to ", "navigate to ", "scroll to ",
         "tap the ", "tap ", "find ", "search for ", "show ", "select ",
-        "افتح ", "اذهب إلى ", "انتقل إلى ", "ابحث عن ", "اعرض ", "اختر ",
+        "افتح ", "افتح صفحة ", "اذهب إلى ", "انتقل إلى ", "ابحث عن ",
+        "اعرض ", "اختر ", "أظهر ",
     )
     lowered = text.lower()
     for verb in verbs:
@@ -651,6 +790,7 @@ def _build_planner_prompt(
     texts: list[str],
     map_: AppMap,
     repeats: int,
+    tried: list[str] | None = None,
 ) -> str:
     lines = [
         f"Goal: {goal}",
@@ -666,6 +806,12 @@ def _build_planner_prompt(
         lines.append(f"Visible text: {shown}")
     if repeats > 1:
         lines.append(f"Note: this exact screen has been seen {repeats} times.")
+    if tried:
+        lines.append(
+            "Already tried on this screen and it did not get you closer: "
+            + ", ".join(tried[:6])
+            + ". Choose a DIFFERENT action; repeating one of these will not help."
+        )
     lines.append(
         'Reply with ONE JSON object using the "action" key, e.g. '
         '{"action": "tap", "label": "visible row text"} or '

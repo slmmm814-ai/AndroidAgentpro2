@@ -11,11 +11,11 @@ android {
         applicationId 'com.ai.agentpro'
         minSdk 24
         targetSdk 35
-        versionCode 3
-        versionName '0.3.0'
-        buildConfigField 'String', 'BUILD_TAG', '"byte-body-read"'
+        versionCode 4
+        versionName '0.4.0'
+        buildConfigField 'String', 'BUILD_TAG', '"node-action"'
         buildConfigField 'String', 'BUILD_CHANNEL', '"x83c-a"'
-        buildConfigField 'int', 'BUILD_SEQ', '305'
+        buildConfigField 'int', 'BUILD_SEQ', '306'
     }
 
     buildFeatures {

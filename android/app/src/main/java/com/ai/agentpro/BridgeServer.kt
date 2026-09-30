@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.FileProvider
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -379,7 +380,14 @@ class BridgeServer(
                         )
                     }
 
-                    val result = accessibility.dumpUi()
+                    val packageName =
+                        request.args.optString("package", "").trim()
+
+                    val result = if (packageName.isEmpty()) {
+                        accessibility.dumpUi()
+                    } else {
+                        accessibility.dumpUiForPackage(packageName)
+                    }
 
                     if (!result.success || result.root == null) {
                         CommandResponse.failure(
@@ -411,6 +419,10 @@ class BridgeServer(
                         )
                     }
                 }
+
+                "list_windows" -> executeListWindows(request)
+
+                "node_action" -> executeNodeAction(request)
 
                 "screenshot" -> executeScreenshot(request)
 
@@ -1412,6 +1424,289 @@ class BridgeServer(
         )
     }
 
+    private fun executeListWindows(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val result = accessibility.listWindows()
+
+        if (!result.success) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.errorCode ?: "LIST_WINDOWS_FAILED",
+                    result.errorMessage ?: "Unable to list windows"
+                )
+            )
+        }
+
+        val windows = JSONArray()
+
+        for (entry in result.windows) {
+            val bounds = JSONObject()
+                .put("left", entry.boundsLeft)
+                .put("top", entry.boundsTop)
+                .put("right", entry.boundsRight)
+                .put("bottom", entry.boundsBottom)
+
+            windows.put(
+                JSONObject()
+                    .put("id", entry.id)
+                    .putNullable("package_name", entry.packageName)
+                    .putNullable("title", entry.title)
+                    .put("active", entry.active)
+                    .put("focused", entry.focused)
+                    .put("window_type", entry.windowType)
+                    .put("bounds", bounds)
+                    .put("root_child_count", entry.rootChildCount)
+            )
+        }
+
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject().put("windows", windows)
+            )
+        )
+    }
+
+    private fun executeNodeAction(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val action = request.args.optString("action", "").trim()
+
+        if (action.isEmpty()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_NODE_ACTION",
+                    "node_action requires an action"
+                )
+            )
+        }
+
+        val targetPackage =
+            request.args.optString("package", "").trim()
+                .ifEmpty { null }
+
+        val resourceId =
+            request.args.optString("resource_id", "").trim()
+                .ifEmpty { null }
+
+        val text = request.args.optString("text", "").trim()
+            .ifEmpty { null }
+
+        val contentDescription =
+            request.args.optString("content_description", "").trim()
+                .ifEmpty { null }
+
+        val className =
+            request.args.optString("class_name", "").trim()
+                .ifEmpty { null }
+
+        val matchIndex = request.args.optInt("match_index", 0)
+        val argumentText =
+            request.args.optString("text_argument", "").trim()
+                .ifEmpty { null }
+
+        val nodePath: IntArray? = if (request.args.has("node_path")) {
+            try {
+                val pathArray = request.args.getJSONArray("node_path")
+                val path = IntArray(pathArray.length())
+
+                for (pathIndex in 0 until pathArray.length()) {
+                    path[pathIndex] = pathArray.getInt(pathIndex)
+                }
+
+                if (path.isEmpty()) null else path
+            } catch (exception: Exception) {
+                return CommandResponse.failure(
+                    400,
+                    BridgeProtocol.error(
+                        request.requestId,
+                        "INVALID_NODE_PATH",
+                        "node_path must be an array of child indices"
+                    )
+                )
+            }
+        } else {
+            null
+        }
+
+        val hasSelector = !resourceId.isNullOrEmpty() ||
+            !text.isNullOrEmpty() ||
+            !contentDescription.isNullOrEmpty() ||
+            !className.isNullOrEmpty()
+
+        if (!hasSelector && nodePath == null) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "MISSING_NODE_SELECTOR",
+                    "node_action needs a node_path or at least one of " +
+                        "resource_id, text, content_description " +
+                        "or class_name"
+                )
+            )
+        }
+
+        val accessibility =
+            AgentAccessibilityService.getInstance()
+
+        if (accessibility == null ||
+            !accessibility.isConnected()
+        ) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "ACCESSIBILITY_NOT_CONNECTED",
+                    "Accessibility service is not connected"
+                )
+            )
+        }
+
+        val executor = commandExecutor
+            ?: return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_UNAVAILABLE",
+                    "Bridge command executor is unavailable"
+                )
+            )
+
+        if (executor.isShutdown) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "COMMAND_EXECUTOR_STOPPED",
+                    "Bridge command executor is stopped"
+                )
+            )
+        }
+
+        val future:
+            Future<AgentAccessibilityService.NodeActionResult> =
+            executor.submit<
+                AgentAccessibilityService.NodeActionResult
+                > {
+                val lock = java.util.concurrent.CountDownLatch(1)
+
+                var result:
+                    AgentAccessibilityService.NodeActionResult? = null
+
+                accessibility.nodeAction(
+                    action = action,
+                    targetPackage = targetPackage,
+                    resourceId = resourceId,
+                    text = text,
+                    contentDescription = contentDescription,
+                    className = className,
+                    matchIndex = matchIndex,
+                    argumentText = argumentText,
+                    nodePath = nodePath
+                ) {
+                    result = it
+                    lock.countDown()
+                }
+
+                if (!lock.await(
+                        GESTURE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                    )
+                ) {
+                    AgentAccessibilityService.NodeActionResult(
+                        success = false,
+                        errorCode = "NODE_ACTION_TIMEOUT",
+                        errorMessage =
+                            "Node action confirmation timed out",
+                        operationId = null,
+                        matched = null
+                    )
+                } else {
+                    result
+                        ?: AgentAccessibilityService.NodeActionResult(
+                            success = false,
+                            errorCode = "NODE_ACTION_NO_RESULT",
+                            errorMessage = "Node action returned no result",
+                            operationId = null,
+                            matched = null
+                        )
+                }
+            }
+
+        val result = future.get(
+            GESTURE_TIMEOUT_MS + 1_000,
+            TimeUnit.MILLISECONDS
+        )
+
+        return if (result.success) {
+            val matched = result.matched
+
+            val data = JSONObject()
+                .put("operation_id", result.operationId)
+                .put("action_performed", true)
+
+            if (matched != null) {
+                data.put(
+                    "matched",
+                    JSONObject()
+                        .putNullable("package_name", matched.packageName)
+                        .putNullable("resource_id", matched.resourceId)
+                        .putNullable("text", matched.text)
+                        .putNullable(
+                            "content_description",
+                            matched.contentDescription
+                        )
+                        .putNullable("class_name", matched.className)
+                        .put("match_index", matched.matchIndex)
+                        .put("match_count", matched.matchCount)
+                        .put(
+                            "bounds",
+                            JSONObject()
+                                .put("left", matched.boundsLeft)
+                                .put("top", matched.boundsTop)
+                                .put("right", matched.boundsRight)
+                                .put("bottom", matched.boundsBottom)
+                        )
+                )
+            }
+
+            CommandResponse.success(
+                BridgeProtocol.success(request.requestId, data)
+            )
+        } else {
+            CommandResponse.failure(
+                503,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.errorCode ?: "NODE_ACTION_FAILED",
+                    result.errorMessage ?: "Node action failed"
+                )
+            )
+        }
+    }
+
     private fun executeKeyEvent(
         request: BridgeProtocol.BridgeRequest
     ): CommandResponse {
@@ -1918,6 +2213,17 @@ class BridgeServer(
         val authorizationToken: String,
         val requestId: String
     )
+
+    private fun JSONObject.putNullable(
+        key: String,
+        value: String?
+    ): JSONObject {
+        return if (value == null) {
+            put(key, JSONObject.NULL)
+        } else {
+            put(key, value)
+        }
+    }
 
     data class CommandResponse(
         val ok: Boolean,

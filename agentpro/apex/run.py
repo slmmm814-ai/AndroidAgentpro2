@@ -97,7 +97,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-repeat", type=int, default=3)
     parser.add_argument("--kill-file", default=None)
     parser.add_argument(
+        "--app",
+        default=None,
+        help=(
+            "package the run must stay inside, e.g. com.instagram.android. "
+            "Success is only accepted while this app is in the foreground."
+        ),
+    )
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help=(
+            "drive the app with node actions instead of screen gestures, so "
+            "the app never has to be in the foreground. Requires --app."
+        ),
+    )
+    parser.add_argument(
         "--no-vision", action="store_true", help="disable the vision fallback"
+    )
+    parser.add_argument(
+        "--gemini-key",
+        default=None,
+        help="Google API key for the vision grounder (default: read from opencode config)",
     )
     parser.add_argument("--gemini-model", default="gemini-3.6-flash")
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
@@ -110,7 +131,20 @@ def main(argv: list[str] | None = None) -> int:
     from .apex_agent import ApexAgent
     from .bridge_driver import BridgeApexDriver
 
-    driver = BridgeApexDriver(vision_grounder=_build_vision_grounder(args))
+    if args.background:
+        if not args.app:
+            print(
+                "error: --background requires --app",
+                file=sys.stderr,
+            )
+            return 2
+
+        from ..background.node_driver import NodeActionDriver
+        from python_core.bridge_client import BridgeClient
+
+        driver = NodeActionDriver(BridgeClient(), package=args.app)
+    else:
+        driver = BridgeApexDriver(vision_grounder=_build_vision_grounder(args))
 
     models = _build_models()
     if models is None:
@@ -126,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps,
         max_repeat=args.max_repeat,
         kill_file=args.kill_file,
+        expect_package=args.app,
     )
     report = agent.run(args.goal)
 

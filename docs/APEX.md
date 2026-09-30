@@ -150,11 +150,27 @@ bounds. Vision is a fallback, not the default.
 ## الفحص
 
 ```bash
-python3 -m unittest discover -s tests -p "test_apex_*.py"   # 127 APEX tests
-python3 -m unittest discover -s tests                        # 822 total
+python3 -m unittest discover -s tests -p "test_apex_*.py"   # 128 APEX tests
+python3 -m unittest discover -s tests                        # 825 total
 ```
 
 The suite asserts the behaviours that matter rather than the call sequence: an
 inert tap must not be reported as success, planner chatter is not an action, a
-failed verification is not a success, a dead target is not tapped twice, and a
-verifier that says "not done" is believed.
+failed verification is not a success, a dead target is not tapped twice, a
+verifier that says "not done" is believed, and a screen outside the app under
+test can never satisfy the goal.
+
+### حارس التطبيق
+
+`ApexAgent(expect_package=...)` يربط التشغيل بتطبيق واحد، و`--app` يمرّره من
+سطر الأوامر. العثور على نص الهدف لا يعني أن المهمة تحققت.
+
+عند خروج الهاتف من التطبيق:
+
+- تتوقف الحلقة فوراً بدل أن تُكمل التخطيط والتمرير على شاشة أخرى.
+- تُسجَّل خطوة `wrong_app`، ولا يمكن أن يُبلَّغ عن نجاح.
+- يُرفض نجاح فرع `done` في الـplanner حتى لو وافق مُحقِّق النموذج.
+
+هذا ليس تحفّظاً نظرياً: في تشغيل حي، كان نص الهدف `ابحث عن الحساب serveai`
+معروضاً في شريط عنوان الطرفية التي كانت تقود الهاتف، فرأت الحلقة الكلمة
+وأعلنت نجاحاً واثقاً بينما الهاتف يعرض شيئاً آخر تماماً.

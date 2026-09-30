@@ -12,6 +12,7 @@ of the goal wording.
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from typing import Any
 
@@ -50,6 +51,7 @@ class _MultiScreenDriver:
         (0, "الأصوات والاهتزاز"): 2,
         (1, "إشعار Samsung"): 2,
         (2, "اهتزاز المكالمات"): 3,
+        (3, "اهتزاز المكالمات مفعّل"): 4,
     }
 
     def __init__(self) -> None:
@@ -58,12 +60,27 @@ class _MultiScreenDriver:
             _Screen(["إشعار Samsung", "الاهتزاز", "الصوت"]),
             _Screen(["اهتزاز المكالمات", "اهتزاز الإشعارات", "اهتزاز اللمس"]),
             _Screen(["اهتزاز المكالمات مفعّل", "اهتزاز المكالمات معطّل"]),
+            # a screen that literally shows the goal text, used to prove that
+            # finding the text is not enough when the wrong app is on screen
+            _Screen(["serveai", "serveaircargo", "servaical exercise"]),
         ]
         self._page = 0
         self.tapped: list[str] = []
         self.tap_calls = 0
+        self.swipes: list[str] = []
+        #: how many times the deterministic text search was attempted
+        self.search_calls = 0
+        #: page index -> foreground package, to simulate leaving the app
+        self.pages_package: dict[int, str] = {}
+
+    def screenshot_b64(self) -> str:
+        return ""
 
     # --- geometry -------------------------------------------------------
+    def go_to(self, page: int) -> None:
+        """Place the device on a given page, as if it had been navigated to."""
+        self._page = page
+
     def _row_bounds(self, index: int) -> tuple[int, int, int, int]:
         top = self.ROW_TOP + index * self.ROW_PITCH
         return (0, top, self.WIDTH, top + self.ROW_HEIGHT)
@@ -89,12 +106,16 @@ class _MultiScreenDriver:
                 )
             )
         return {
-            "package": "com.android.settings",
-            "activity": "Settings",
+            "package": self._package(),
+            "activity": "Settings" if self._package() == "com.android.settings" else "MainActivity",
             "fingerprint": f"p{self._page}:{'|'.join(page.rows)}",
             "texts": list(page.rows),
             "candidates": cands,
         }
+
+    def _package(self) -> str:
+        """Which app is foreground, so a run can be shown leaving it."""
+        return self.pages_package.get(self._page, "com.android.settings")
 
     def snapshot(self, force: bool = True) -> dict[str, Any]:
         return self.observe(force=force)
@@ -136,38 +157,56 @@ class _MultiScreenDriver:
         return f"p{self._page}:{'|'.join(self._pages[self._page].rows)}"
 
     def swipe(self, direction: str, distance: int = 900) -> dict[str, Any]:
+        self.swipes.append(direction)
         return {"ok": True, "moved": False}
 
     def find_text(self, text: str) -> dict[str, Any] | None:
         return None
 
     # --- physics surface exposed to the agent ---------------------------
-    def physics(self) -> "_MultiScreenDriver":
+    def physics(self) -> Any:  # type: ignore[override]
         return self
 
     def scroll_once(self, direction: str = "down") -> ScrollToTextResult:
-        return ScrollToTextResult(
-            text="",
-            found=False,
-            flings=1,
-            center=None,
-            duration_seconds=0.0,
-            moved=False,
-            final_fingerprint=self.fingerprint(),
-        )
+        return self._fake_fling(direction)
 
     def scroll_to_text(self, text: str, max_flings: int = 6) -> ScrollToTextResult:
-        """The scripted pages never scroll; report that honestly."""
+        """Fling until the text shows, like the real physics module.
+
+        The scripted pages do not scroll, so this always fails — but it
+        performs the flings, and each costs time, which is what the agent's
+        deadline is meant to catch.
+        """
+        count = max(1, max_flings)
+        self.search_calls += 1
+        for _ in range(count):
+            self._fake_fling("down", flings=1)
+        # report the full set of flings as one result, moved=True
         return ScrollToTextResult(
             text=text,
             found=False,
-            flings=0,
+            flings=count,
             center=None,
-            duration_seconds=0.0,
-            moved=False,
+            duration_seconds=0.002 * count,
+            moved=True,
             final_fingerprint=self.fingerprint(),
         )
 
+    def _fake_fling(
+        self, direction: str, *, found: bool = False, flings: int = 1
+    ) -> ScrollToTextResult:
+        self.swipes.append(direction)
+        # a real fling takes a measurable moment; keep it small but non-zero
+        time.sleep(0.002)
+        return ScrollToTextResult(
+            text="",
+            found=found,
+            flings=flings,
+            center=None,
+            duration_seconds=0.002 * flings,
+            moved=flings > 0,
+            final_fingerprint=self.fingerprint(),
+        )
 
 class _TierStub(TieredModels):
     """A TieredModels that plans from the prompt it is given.
@@ -267,6 +306,93 @@ class MultiStepNavigationTest(unittest.TestCase):
         # screen change must not be reported as success.
         self.assertFalse(result.success)
         self.assertIsNotNone(result.reason)
+
+    def test_repeating_one_action_is_discouraged(self) -> None:
+        """A planner that keeps proposing the same tap must be told to stop.
+
+        On a live device the planner re-issued {"action":"tap","label":
+        "serveai.ig"} every step and the loop spun to the repeat guard: the
+        prompt described the screen but never said what had already been
+        tried, and a fresh look at the same screen invites the same answer.
+        """
+        driver = _MultiScreenDriver()
+        models = _TierStub(
+            script=['{"action": "tap", "label": "البطارية"}'] * 6
+        )
+        result = _agent(driver, models, max_steps=6).run("افتح البطارية")
+
+        # The driver records a tap even when it navigates nowhere, so the
+        # same row would be tapped over and over without the memory.
+        self.assertLessEqual(
+            driver.tap_calls, 3, msg=f"same action repeated: {driver.tap_calls} taps"
+        )
+        # and the prompt must have told the planner what was already tried
+        self.assertTrue(
+            any("Already tried" in prompt for prompt in models.prompts),
+            msg="the planner was never told which actions failed",
+        )
+
+    def test_goal_text_elsewhere_on_screen_is_not_success(self) -> None:
+        """A stray copy of the goal string must not verify the goal.
+
+        This is what a live run actually did: the goal "ابحث عن الحساب
+        serveai" was printed in the title bar of the very terminal driving
+        the phone, so a screen outside the app under test contained the
+        target text and the loop reported a confident success while the phone
+        was showing something else entirely.
+        """
+        driver = _MultiScreenDriver()
+        driver.go_to(3)
+        # pages 3 and 4 are Instagram; page 4 is the impostor window that
+        # carries the goal text but is not the app under test
+        driver.pages_package[3] = "com.instagram.android"
+        driver.pages_package[4] = "com.termux"
+        models = _TierStub(
+            script=['{"action": "tap", "label": "اهتزاز المكالمات مفعّل"}'] * 2
+        )
+        agent = ApexAgent(
+            driver,  # type: ignore[arg-type]
+            models,  # type: ignore[arg-type]
+            max_steps=4,
+            expect_package="com.instagram.android",
+        )
+        result = agent.run("serveai")
+
+        self.assertEqual(driver.page, 4, msg="precondition: the run left the app")
+        self.assertFalse(result.success, msg="verified outside the app under test")
+        self.assertIn("wrong_app", [s.result for s in result.steps])
+        # and the loop must not keep working against the wrong app
+        self.assertIn("com.termux", result.reason or "")
+        self.assertLessEqual(
+            driver.tap_calls, 1, msg=f"kept acting after leaving: {driver.tap_calls} taps"
+        )
+
+    def test_scroll_search_is_bounded(self) -> None:
+        """A never-settling feed must not be flung forever.
+
+        The live run spent 173 seconds and 41 flings scrolling an Instagram
+        home feed that was never going to contain the target, because
+        scroll_to_text only stopped when the fingerprint stopped changing and
+        a feed always produces fresh content.
+        """
+        driver = _MultiScreenDriver()
+        agent = ApexAgent(
+            driver,  # type: ignore[arg-type]
+            _TierStub(),  # type: ignore[arg-type]
+            max_steps=4,
+            scroll_flings=3,
+            scroll_deadline_seconds=0.0001,
+        )
+        agent.run("zzz-not-anywhere")
+        # the deterministic search must be given up on, not retried forever
+        self.assertEqual(
+            driver.search_calls, 1, msg=f"search retried {driver.search_calls} times"
+        )
+        self.assertTrue(
+            any(s.result == "scroll_timeout" for s in agent.steps),
+            msg=f"no scroll_timeout recorded: {[(s.action, s.result) for s in agent.steps]}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -942,6 +942,594 @@ class AgentAccessibilityService : AccessibilityService() {
         callback(result)
     }
 
+    fun listWindows(): WindowListResult {
+        if (!isConnected()) {
+            return WindowListResult(
+                success = false,
+                errorCode = "ACCESSIBILITY_NOT_CONNECTED",
+                errorMessage = "Accessibility service is not connected",
+                windows = emptyList()
+            )
+        }
+
+        return try {
+            val allWindows = windows
+
+            if (allWindows.isNullOrEmpty()) {
+                return WindowListResult(
+                    success = false,
+                    errorCode = "NO_WINDOWS",
+                    errorMessage =
+                        "No interactive windows are currently visible",
+                    windows = emptyList()
+                )
+            }
+
+            val entries = allWindows
+                .filter {
+                    it.type !=
+                        AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+                }
+                .map { window ->
+                    val root = try {
+                        window.root
+                    } catch (exception: Exception) {
+                        Log.w(
+                            TAG,
+                            "Unable to read a window root",
+                            exception
+                        )
+
+                        null
+                    }
+
+                    val bounds = Rect()
+                    window.getBoundsInScreen(bounds)
+
+                    WindowEntry(
+                        id = window.id,
+                        packageName = root?.packageName?.toString(),
+                        title = window.title?.toString(),
+                        active = window.isActive,
+                        focused = window.isFocused,
+                        windowType = window.type,
+                        boundsLeft = bounds.left,
+                        boundsTop = bounds.top,
+                        boundsRight = bounds.right,
+                        boundsBottom = bounds.bottom,
+                        rootChildCount = root?.childCount ?: 0
+                    )
+                }
+
+            WindowListResult(
+                success = true,
+                errorCode = null,
+                errorMessage = null,
+                windows = entries
+            )
+        } catch (exception: Exception) {
+            Log.e(TAG, "list_windows failed", exception)
+
+            WindowListResult(
+                success = false,
+                errorCode = "LIST_WINDOWS_FAILED",
+                errorMessage =
+                    exception.message ?: "Unable to list windows",
+                windows = emptyList()
+            )
+        }
+    }
+
+    fun dumpUiForPackage(packageName: String): UiDumpResult {
+        if (!isConnected()) {
+            return UiDumpResult(
+                success = false,
+                errorCode = "ACCESSIBILITY_NOT_CONNECTED",
+                errorMessage = "Accessibility service is not connected",
+                root = null
+            )
+        }
+
+        if (packageName.isBlank()) {
+            return UiDumpResult(
+                success = false,
+                errorCode = "EMPTY_PACKAGE_NAME",
+                errorMessage = "ui_dump requires a non-empty package name",
+                root = null
+            )
+        }
+
+        val deadline =
+            SystemClock.uptimeMillis() + DUMP_RETRY_WINDOW_MS
+
+        while (SystemClock.uptimeMillis() < deadline) {
+            try {
+                val packageRoot =
+                    findWindowRootForPackage(packageName)
+
+                if (packageRoot != null) {
+                    return buildDumpResult(packageRoot)
+                }
+            } catch (securityException: SecurityException) {
+                Log.e(
+                    TAG,
+                    "Security error during package UI dump",
+                    securityException
+                )
+
+                return UiDumpResult(
+                    success = false,
+                    errorCode = "UI_DUMP_SECURITY_ERROR",
+                    errorMessage = securityException.message
+                        ?: "Security error during UI dump",
+                    root = null
+                )
+            } catch (exception: Exception) {
+                Log.e(TAG, "package UI dump failed", exception)
+
+                return UiDumpResult(
+                    success = false,
+                    errorCode = "UI_DUMP_FAILED",
+                    errorMessage = exception.message
+                        ?: "Unexpected package UI dump failure",
+                    root = null
+                )
+            }
+
+            SystemClock.sleep(DUMP_RETRY_PAUSE_MS)
+        }
+
+        return UiDumpResult(
+            success = false,
+            errorCode = "PACKAGE_NOT_FOUND",
+            errorMessage =
+                "No visible window for package $packageName",
+            root = null
+        )
+    }
+
+    fun nodeAction(
+        action: String,
+        targetPackage: String?,
+        resourceId: String?,
+        text: String?,
+        contentDescription: String?,
+        className: String?,
+        matchIndex: Int,
+        argumentText: String?,
+        nodePath: IntArray?,
+        callback: (NodeActionResult) -> Unit
+    ) {
+        if (!isConnected()) {
+            callback(
+                NodeActionResult(
+                    success = false,
+                    errorCode = "ACCESSIBILITY_NOT_CONNECTED",
+                    errorMessage =
+                        "Accessibility service is not connected",
+                    operationId = null,
+                    matched = null
+                )
+            )
+            return
+        }
+
+        val normalizedAction = action.trim().lowercase()
+
+        val supported = setOf(
+            "click",
+            "long_click",
+            "scroll_forward",
+            "scroll_backward",
+            "set_text",
+            "focus",
+            "clear_focus",
+            "select"
+        )
+
+        if (normalizedAction.isEmpty() ||
+            normalizedAction !in supported
+        ) {
+            callback(
+                NodeActionResult(
+                    success = false,
+                    errorCode = "UNSUPPORTED_NODE_ACTION",
+                    errorMessage =
+                        "Unsupported node action: $action",
+                    operationId = null,
+                    matched = null
+                )
+            )
+            return
+        }
+
+        if (normalizedAction == "set_text" &&
+            argumentText.isNullOrEmpty()
+        ) {
+            callback(
+                NodeActionResult(
+                    success = false,
+                    errorCode = "MISSING_NODE_TEXT",
+                    errorMessage =
+                        "set_text requires a non-empty text argument",
+                    operationId = null,
+                    matched = null
+                )
+            )
+            return
+        }
+
+        val operationId = operationCounter.incrementAndGet()
+
+        val result = runNodeActionResultOnMain(
+            deadlineMs = NODE_OP_TIMEOUT_MS,
+            operationName = "node_action",
+            onTimeout = NodeActionResult(
+                success = false,
+                errorCode = "NODE_ACTION_TIMEOUT",
+                errorMessage =
+                    "Node action did not finish in time",
+                operationId = operationId,
+                matched = null
+            ),
+            nodeOp = {
+                val root = if (targetPackage.isNullOrBlank()) {
+                    rootInActiveWindow
+                } else {
+                    findWindowRootForPackage(targetPackage)
+                }
+
+                if (root == null) {
+                    NodeActionResult(
+                        success = false,
+                        errorCode = "NODE_WINDOW_UNAVAILABLE",
+                        errorMessage = if (targetPackage.isNullOrBlank()) {
+                            "No active accessibility window"
+                        } else {
+                            "No visible window for package $targetPackage"
+                        },
+                        operationId = operationId,
+                        matched = null
+                    )
+                } else {
+                    performNodeAction(
+                        operationId = operationId,
+                        root = root,
+                        action = normalizedAction,
+                        resourceId = resourceId,
+                        text = text,
+                        contentDescription = contentDescription,
+                        className = className,
+                        matchIndex = matchIndex,
+                        argumentText = argumentText,
+                        nodePath = nodePath
+                    )
+                }
+            }
+        )
+
+        callback(result)
+    }
+
+    private fun findWindowRootForPackage(
+        packageName: String
+    ): AccessibilityNodeInfo? {
+        val allWindows = try {
+            windows
+        } catch (exception: Exception) {
+            Log.w(
+                TAG,
+                "Unable to list windows for package lookup",
+                exception
+            )
+
+            return null
+        }
+
+        for (window in allWindows) {
+            if (window.type ==
+                AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+            ) {
+                continue
+            }
+
+            val root = try {
+                window.root
+            } catch (exception: Exception) {
+                null
+            } ?: continue
+
+            if (root.isVisibleToUser &&
+                root.packageName?.toString() == packageName
+            ) {
+                return root
+            }
+        }
+
+        return null
+    }
+
+    private fun resolveNodeByPath(
+        root: AccessibilityNodeInfo,
+        path: IntArray
+    ): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo = root
+
+        for (step in path) {
+            if (step < 0 || step >= current.childCount) {
+                return null
+            }
+
+            current = current.getChild(step) ?: return null
+        }
+
+        return current
+    }
+
+    private fun performNodeAction(
+        operationId: Long,
+        root: AccessibilityNodeInfo,
+        action: String,
+        resourceId: String?,
+        text: String?,
+        contentDescription: String?,
+        className: String?,
+        matchIndex: Int,
+        argumentText: String?,
+        nodePath: IntArray?
+    ): NodeActionResult {
+        val target: AccessibilityNodeInfo
+
+        if (nodePath != null && nodePath.isNotEmpty()) {
+            target = resolveNodeByPath(root, nodePath)
+                ?: return NodeActionResult(
+                    success = false,
+                    errorCode = "NODE_PATH_INVALID",
+                    errorMessage =
+                        "The node path does not resolve in this window",
+                    operationId = operationId,
+                    matched = null
+                )
+        } else {
+            val matches = findMatchingNodes(
+                root = root,
+                resourceId = resourceId,
+                text = text,
+                contentDescription = contentDescription,
+                className = className
+            )
+
+            if (matches.isEmpty()) {
+                return NodeActionResult(
+                    success = false,
+                    errorCode = "NODE_NOT_FOUND",
+                    errorMessage =
+                        "No node matched the given selector in this window",
+                    operationId = operationId,
+                    matched = null
+                )
+            }
+
+            val safeIndex = if (matchIndex < 0) {
+                0
+            } else if (matchIndex >= matches.size) {
+                matches.size - 1
+            } else {
+                matchIndex
+            }
+
+            target = matches[safeIndex]
+        }
+
+        val bounds = Rect()
+        target.getBoundsInScreen(bounds)
+
+        val summary = MatchedNode(
+            packageName = target.packageName?.toString(),
+            resourceId = target.viewIdResourceName,
+            text = target.text?.toString(),
+            contentDescription = target.contentDescription?.toString(),
+            className = target.className?.toString(),
+            matchIndex = if (nodePath != null) -1 else matchIndex,
+            matchCount = if (nodePath != null) 1 else 1,
+            boundsLeft = bounds.left,
+            boundsTop = bounds.top,
+            boundsRight = bounds.right,
+            boundsBottom = bounds.bottom
+        )
+
+        val performed = when (action) {
+            "click" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_CLICK
+                )
+            "long_click" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_LONG_CLICK
+                )
+            "scroll_forward" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                )
+            "scroll_backward" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                )
+            "focus" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_FOCUS
+                )
+            "clear_focus" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_CLEAR_FOCUS
+                )
+            "select" ->
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_SELECT
+                )
+            else -> {
+                val args = Bundle().apply {
+                    putCharSequence(
+                        AccessibilityNodeInfo
+                            .ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                        argumentText
+                    )
+                }
+
+                target.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    args
+                )
+            }
+        }
+
+        return if (performed) {
+            Log.i(
+                TAG,
+                "node_action completed id=$operationId " +
+                    "action=$action package=${summary.packageName}"
+            )
+
+            NodeActionResult(
+                success = true,
+                errorCode = null,
+                errorMessage = null,
+                operationId = operationId,
+                matched = summary
+            )
+        } else {
+            Log.w(
+                TAG,
+                "node_action rejected id=$operationId action=$action"
+            )
+
+            NodeActionResult(
+                success = false,
+                errorCode = "NODE_ACTION_REJECTED",
+                errorMessage =
+                    "The node rejected the requested action $action",
+                operationId = operationId,
+                matched = summary
+            )
+        }
+    }
+
+    private fun findMatchingNodes(
+        root: AccessibilityNodeInfo?,
+        resourceId: String?,
+        text: String?,
+        contentDescription: String?,
+        className: String?
+    ): List<AccessibilityNodeInfo> {
+        if (root == null) {
+            return emptyList()
+        }
+
+        val matches = ArrayList<AccessibilityNodeInfo>()
+
+        fun visit(node: AccessibilityNodeInfo) {
+            if (matchesNodeSelector(
+                    node = node,
+                    resourceId = resourceId,
+                    text = text,
+                    contentDescription = contentDescription,
+                    className = className
+                )
+            ) {
+                matches.add(node)
+            }
+
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return matches
+    }
+
+    private fun matchesNodeSelector(
+        node: AccessibilityNodeInfo,
+        resourceId: String?,
+        text: String?,
+        contentDescription: String?,
+        className: String?
+    ): Boolean {
+        if (resourceId != null &&
+            node.viewIdResourceName != resourceId
+        ) {
+            return false
+        }
+
+        if (text != null && node.text?.toString() != text) {
+            return false
+        }
+
+        if (contentDescription != null &&
+            node.contentDescription?.toString() != contentDescription
+        ) {
+            return false
+        }
+
+        if (className != null &&
+            node.className?.toString() != className
+        ) {
+            return false
+        }
+
+        return true
+    }
+
+    private fun runNodeActionResultOnMain(
+        deadlineMs: Long,
+        operationName: String,
+        onTimeout: NodeActionResult,
+        nodeOp: () -> NodeActionResult
+    ): NodeActionResult {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val cell =
+            java.util.concurrent.atomic.AtomicReference<NodeActionResult?>(null)
+        val failure =
+            java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+
+        mainHandler.post {
+            try {
+                cell.set(nodeOp())
+            } catch (securityException: SecurityException) {
+                failure.set(securityException)
+            } catch (exception: Exception) {
+                failure.set(exception)
+            } finally {
+                gate.countDown()
+            }
+        }
+
+        if (!gate.await(deadlineMs, TimeUnit.MILLISECONDS)) {
+            Log.w(
+                TAG,
+                "$operationName timed out waiting for the main thread"
+            )
+            return onTimeout
+        }
+
+        failure.get()?.let {
+            Log.e(TAG, "$operationName failed on the main thread", it)
+
+            return NodeActionResult(
+                success = false,
+                errorCode =
+                    "${operationName.uppercase()}_MAIN_THREAD_ERROR"
+                        .replace(' ', '_'),
+                errorMessage = it.message ?: "Node operation failed",
+                operationId = null,
+                matched = null
+            )
+        }
+
+        return cell.get() ?: onTimeout
+    }
+
     fun windowInfo(): WindowInfoResult {
         if (!isConnected()) {
             return WindowInfoResult(
@@ -1467,5 +2055,48 @@ class AgentAccessibilityService : AccessibilityService() {
         val packageName: String?,
         val activityName: String?,
         val windowTitle: String?
+    )
+
+    data class WindowEntry(
+        val id: Int,
+        val packageName: String?,
+        val title: String?,
+        val active: Boolean,
+        val focused: Boolean,
+        val windowType: Int,
+        val boundsLeft: Int,
+        val boundsTop: Int,
+        val boundsRight: Int,
+        val boundsBottom: Int,
+        val rootChildCount: Int
+    )
+
+    data class WindowListResult(
+        val success: Boolean,
+        val errorCode: String?,
+        val errorMessage: String?,
+        val windows: List<WindowEntry>
+    )
+
+    data class MatchedNode(
+        val packageName: String?,
+        val resourceId: String?,
+        val text: String?,
+        val contentDescription: String?,
+        val className: String?,
+        val matchIndex: Int,
+        val matchCount: Int,
+        val boundsLeft: Int,
+        val boundsTop: Int,
+        val boundsRight: Int,
+        val boundsBottom: Int
+    )
+
+    data class NodeActionResult(
+        val success: Boolean,
+        val errorCode: String?,
+        val errorMessage: String?,
+        val operationId: Long?,
+        val matched: MatchedNode?
     )
 }

@@ -520,6 +520,258 @@ class BridgeClient:
 
         return self.command("launch_app", {"package": package})
 
+    # -- multi-window / node-action API -------------------------------- #
+    #
+    # These commands address a *specific* window by package and drive it
+    # through accessibility node actions (ACTION_CLICK,
+    # ACTION_SCROLL_FORWARD, ...) rather than screen-coordinate gestures.
+    # A dispatchGesture only reaches the focused window, but a node action
+    # reaches any window the service can see, which is what lets an app be
+    # driven while another one stays in the foreground.
+
+    def list_windows(self) -> BridgeResponse:
+        """List every interactive window currently visible to the service."""
+        return self.command("list_windows")
+
+    def window_packages(self) -> list[str]:
+        """Return the packages of all visible windows (deduplicated)."""
+        response = self.list_windows()
+        data = response.data or {}
+        seen: list[str] = []
+        for window in data.get("windows", []):
+            package = window.get("package_name")
+            if isinstance(package, str) and package and package not in seen:
+                seen.append(package)
+        return seen
+
+    def ui_dump_for_package(self, package: str) -> BridgeResponse:
+        """Dump the UI tree of a specific package's visible window.
+
+        Unlike ``ui_dump`` (which reads the focused window), this reads the
+        window whose root package matches, so a background app's tree stays
+        reachable while another app is in the foreground.
+        """
+        if not isinstance(package, str) or not package.strip():
+            raise BridgeConfigurationError(
+                "ui_dump_for_package requires a non-empty package name"
+            )
+
+        return self.command("ui_dump", {"package": package.strip()})
+
+    def node_action(
+        self,
+        action: str,
+        *,
+        package: str | None = None,
+        resource_id: str | None = None,
+        text: str | None = None,
+        content_description: str | None = None,
+        class_name: str | None = None,
+        match_index: int = 0,
+        text_argument: str | None = None,
+        node_path: list[int] | None = None,
+    ) -> BridgeResponse:
+        """Run an accessibility action on a node inside a specific window.
+
+        The node is located either by ``node_path`` (the exact sequence of
+        child indices from the window root, as exposed by
+        ``node_paths_of``) or by a selector (any combination of
+        ``resource_id``, ``text``, ``content_description`` and
+        ``class_name``); all supplied selector fields must match, and
+        ``match_index`` picks among several matches.
+
+        Actions: ``click``, ``long_click``, ``scroll_forward``,
+        ``scroll_backward``, ``set_text`` (needs ``text_argument``),
+        ``focus``, ``clear_focus``, ``select``.
+        """
+        if not isinstance(action, str) or not action.strip():
+            raise BridgeConfigurationError(
+                "node_action requires a non-empty action"
+            )
+
+        action = action.strip()
+
+        if len(action) > 64:
+            raise BridgeConfigurationError(
+                "node_action action must not exceed 64 characters"
+            )
+
+        if node_path is not None:
+            if not isinstance(node_path, list) or not node_path:
+                raise BridgeConfigurationError(
+                    "node_action node_path must be a non-empty list of ints"
+                )
+
+            if not all(isinstance(i, int) and i >= 0 for i in node_path):
+                raise BridgeConfigurationError(
+                    "node_action node_path must be non-negative ints"
+                )
+
+        if not any(
+            isinstance(v, str) and v.strip()
+            for v in (
+                resource_id,
+                text,
+                content_description,
+                class_name,
+            )
+        ) and node_path is None:
+            raise BridgeConfigurationError(
+                "node_action needs a node_path or a selector field"
+            )
+
+        if match_index < 0 or not isinstance(match_index, int):
+            raise BridgeConfigurationError(
+                "node_action match_index must be a non-negative integer"
+            )
+
+        args: dict[str, Any] = {
+            "action": action,
+            "match_index": match_index,
+        }
+
+        if package:
+            args["package"] = package.strip()
+        if resource_id:
+            args["resource_id"] = resource_id.strip()
+        if text:
+            args["text"] = text.strip()
+        if content_description:
+            args["content_description"] = content_description.strip()
+        if class_name:
+            args["class_name"] = class_name.strip()
+        if text_argument:
+            args["text_argument"] = text_argument
+        if node_path is not None:
+            args["node_path"] = [int(i) for i in node_path]
+
+        return self.command("node_action", args)
+
+    def node_click(
+        self,
+        package: str,
+        *,
+        resource_id: str | None = None,
+        text: str | None = None,
+        content_description: str | None = None,
+        class_name: str | None = None,
+        match_index: int = 0,
+    ) -> BridgeResponse:
+        return self.node_action(
+            "click",
+            package=package,
+            resource_id=resource_id,
+            text=text,
+            content_description=content_description,
+            class_name=class_name,
+            match_index=match_index,
+        )
+
+    def node_scroll(
+        self,
+        package: str,
+        direction: str = "forward",
+        *,
+        resource_id: str | None = None,
+        text: str | None = None,
+        content_description: str | None = None,
+        class_name: str | None = None,
+        match_index: int = 0,
+        node_path: list[int] | None = None,
+    ) -> BridgeResponse:
+        if direction not in ("forward", "backward"):
+            raise BridgeConfigurationError(
+                "node_scroll direction must be forward or backward"
+            )
+
+        return self.node_action(
+            f"scroll_{direction}",
+            package=package,
+            resource_id=resource_id,
+            text=text,
+            content_description=content_description,
+            class_name=class_name,
+            match_index=match_index,
+            node_path=node_path,
+        )
+
+    def scrollable_node_paths(
+        self,
+        package: str,
+        *,
+        limit: int = 8,
+    ) -> list[list[int]]:
+        """Return node paths of scrollable containers in a package window.
+
+        Each entry is the child-index path from the window root, suitable
+        for ``node_scroll(node_path=...)``. Ordering is breadth-first, so
+        the outermost (usually the main feed) container comes first.
+        """
+        response = self.ui_dump_for_package(package)
+        data = response.data or {}
+        root = data.get("root")
+
+        if not isinstance(root, Mapping):
+            return []
+
+        paths: list[list[int]] = []
+
+        def visit(node: Mapping[str, Any], path: list[int]) -> None:
+            if len(paths) >= limit:
+                return
+
+            if node.get("scrollable") is True:
+                paths.append(list(path))
+
+            for index, child in enumerate(node.get("children") or ()):
+                if isinstance(child, Mapping):
+                    visit(child, path + [index])
+
+        if isinstance(root, Mapping):
+            visit(root, [])
+
+        return paths
+
+    def window_feed_paths(
+        self,
+        package: str,
+        *,
+        limit: int = 8,
+    ) -> list[list[int]]:
+        """Return node paths of the vertical RecyclerView-like containers.
+
+        Instagram's feed is a RecyclerView (class
+        ``androidx.recyclerview.widget.RecyclerView``). This is a typed
+        convenience over ``scrollable_node_paths``.
+        """
+        response = self.ui_dump_for_package(package)
+        data = response.data or {}
+        root = data.get("root")
+
+        if not isinstance(root, Mapping):
+            return []
+
+        paths: list[list[int]] = []
+
+        def visit(node: Mapping[str, Any], path: list[int]) -> None:
+            if len(paths) >= limit:
+                return
+
+            class_name = node.get("class_name") or ""
+            if (
+                node.get("scrollable") is True
+                and isinstance(class_name, str)
+                and "RecyclerView" in class_name
+            ):
+                paths.append(list(path))
+
+            for index, child in enumerate(node.get("children") or ()):
+                if isinstance(child, Mapping):
+                    visit(child, path + [index])
+
+        visit(root, [])
+        return paths
+
     @staticmethod
     def _encode_json(payload: Mapping[str, Any]) -> bytes:
         try:
