@@ -440,6 +440,24 @@ class ApexAgent:
                         self._driver.tap(int(x), int(y))
                         taps += 1
                         outcome = "tapped"
+                    else:
+                        # A label is more useful than a coordinate: the model
+                        # cannot measure pixels, but it can read the tree. Raw
+                        # coordinates were the only accepted form, so every
+                        # model that replied {"action":"tap","label":...} was
+                        # silently unparsable and the loop never advanced.
+                        label = action.get("label") or action.get("text")
+                        if not label:
+                            outcome = "unsupported_action"
+                        else:
+                            hit = _find_candidate(str(label), list(candidates))
+                            if hit is None:
+                                outcome = "label_not_found"
+                            else:
+                                cx, cy = hit.center()
+                                self._driver.tap(cx, cy)
+                                taps += 1
+                                outcome = "tapped_by_label"
                 elif kind in ("done", "finish", "success"):
                     if self._ask_verifier(goal, fingerprint, [str(t).lower() for t in texts]):
                         report.success = True
@@ -523,25 +541,67 @@ def _parse_action(answer: str) -> dict[str, Any] | None:
     return None
 
 
-def _extract_target(goal: str) -> str | None:
-    """Best-effort: pull 'the X' style target out of a natural-language goal.
+#: Words that describe the thing rather than name it. Dropped from the front
+#: of an extracted target so "open page Sounds" looks for "Sounds", not
+#: "page Sounds" — a label that appears nowhere on screen.
+_TARGET_FILLER = frozenset(
+    {
+        "the", "a", "an", "item", "row", "page", "screen", "option", "setting",
+        "صفحة", "شاشة", "العنصر", "إعداد", "اعداد", "خيار", "صف", "القسم",
+    }
+)
 
-    Kept intentionally simple — this is a heuristic for the fast path, not a
-    parser. When it fails, the loop falls back to the planner.
+
+def _extract_target(goal: str) -> str | None:
+    """Pull the target phrase out of a natural-language goal.
+
+    This is a heuristic for the fast path, not a parser; when it fails the
+    loop falls back to the planner. Two rules learned from live use:
+
+    - A single trailing token is too small an anchor. "open اهتزاز المكالمات"
+      is one label on screen, and "المكالمات" also matches call-history rows,
+      so the tap lands on the wrong widget. Keep the whole trailing phrase.
+    - Verb prefixes ("open", "افتح", "go to") are dropped, because the verb is
+      an instruction rather than part of the label being looked for.
     """
     if not goal:
         return None
-    lowered = goal.strip().lower()
-    for marker in ("named ", "called ", "open the chat ", "tap "):
+    text = goal.strip()
+    # drop leading instruction verbs, in either language
+    verbs = (
+        "open the ", "open ", "go to ", "navigate to ", "scroll to ",
+        "tap the ", "tap ", "find ", "search for ", "show ", "select ",
+        "افتح ", "اذهب إلى ", "انتقل إلى ", "ابحث عن ", "اعرض ", "اختر ",
+    )
+    lowered = text.lower()
+    for verb in verbs:
+        if lowered.startswith(verb):
+            text = text[len(verb) :]
+            lowered = lowered[len(verb) :]
+            break
+    text = text.strip().strip(".,!?؟")
+    if not text:
+        return None
+
+    # Explicit quotes/markers win outright. The label is returned lower-cased:
+    # matching is case-insensitive anyway, and a lower-cased target keeps the
+    # step records and the planner prompt stable across input casing.
+    for marker in ("named ", "called ", "المسماة ", "بعنوان "):
         if marker in lowered:
-            after = lowered.split(marker, 1)[1]
-            word = after.strip().split()[0] if after.strip() else ""
-            word = word.strip(".,!?")
+            index = lowered.index(marker) + len(marker)
+            word = lowered[index:].strip().split()[0] if lowered[index:].strip() else ""
+            word = word.strip(".,!?؟")
             if word:
                 return word
-    # fall back to the last meaningful token
-    tokens = [t for t in lowered.split() if len(t) > 2]
-    return tokens[-1] if tokens else None
+
+    # A multi-word tail is a better anchor than one token: keep it whole, but
+    # drop short leading filler ("the", "the item").
+    tokens = [t for t in text.split() if t]
+    while len(tokens) > 1 and tokens[0].lower() in _TARGET_FILLER:
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    return " ".join(tokens).lower()
 
 
 def _find_candidate(target: str, candidates: list[GroundCandidate]) -> GroundCandidate | None:
@@ -606,5 +666,20 @@ def _build_planner_prompt(
         lines.append(f"Visible text: {shown}")
     if repeats > 1:
         lines.append(f"Note: this exact screen has been seen {repeats} times.")
-    lines.append("Reply with one JSON action, e.g. {\"tap\": \"label\"} or {\"scroll\": \"down\"}.")
+    lines.append(
+        'Reply with ONE JSON object using the "action" key, e.g. '
+        '{"action": "tap", "label": "visible row text"} or '
+        '{"action": "scroll", "direction": "down"} or '
+        '{"action": "type", "text": "hello"} or '
+        '{"action": "back"} or '
+        '{"action": "done"}.'
+    )
+    lines.append(
+        "Prefer tapping by label over raw coordinates: you can read the text "
+        "above but you cannot measure pixels."
+    )
+    lines.append(
+        "Navigate one step at a time: pick the single action that makes the "
+        "most progress toward the goal from the text you can see now."
+    )
     return "\n".join(lines)

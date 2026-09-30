@@ -137,9 +137,21 @@ bounds. Vision is a fallback, not the default.
 
 ## Tests
 
+## حدود معروفة
+
+- الدليل الحتمي للنجاح هو ظهور اسم الهدف في الشاشة الجديدة. هذا صحيح لفتح
+  محادثة أو صفحة، لكنه لا يغطي المهام التي لا تعرض اسمها (كتابة رسالة، تبديل
+  إعداد) — تلك تذهب إلى مُحقِّق النموذج، وهي أبطأ وأقل حتمية.
+- التخطيط متعدد الخطوات يعتمد على planner يختار صفاً واحداً في كل مرة. لا
+  يوجد بعد مخطط مسار يخطّط المسار كاملاً قبل التنفيذ.
+- استخراج الهدف نصي (_extract_target) ويعمل جيداً للأهداف المفردة، لكنه لا
+  يفكّك الأهداف المركّبة إلى خطوات.
+
+## الفحص
+
 ```bash
-python3 -m unittest discover -s tests -p "test_apex_*.py"   # 117 APEX tests
-python3 -m unittest discover -s tests                        # 814 total
+python3 -m unittest discover -s tests -p "test_apex_*.py"   # 127 APEX tests
+python3 -m unittest discover -s tests                        # 822 total
 ```
 
 The suite asserts the behaviours that matter rather than the call sequence: an

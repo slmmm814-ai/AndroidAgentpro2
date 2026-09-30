@@ -212,14 +212,66 @@ class TestHelpers(unittest.TestCase):
     def test_extract_target_called(self) -> None:
         self.assertEqual(_extract_target("message called Ali"), "ali")
 
-    def test_extract_target_fallback_last_token(self) -> None:
-        self.assertEqual(_extract_target("scroll to the settings menu"), "menu")
+    def test_extract_target_fallback_keeps_the_phrase(self) -> None:
+        # "menu" alone also matches menus elsewhere; the visible label is the
+        # whole phrase, so the phrase is the anchor.
+        self.assertEqual(_extract_target("scroll to the settings menu"), "settings menu")
 
     def test_extract_target_empty(self) -> None:
         self.assertIsNone(_extract_target(""))
 
     def test_extract_target_tap_marker(self) -> None:
+        # Targets are normalised to lower case: matching is case-insensitive,
+        # and it keeps the step records and the planner prompt stable.
         self.assertEqual(_extract_target("tap Send"), "send")
+
+    def test_extract_target_drops_leading_filler(self) -> None:
+        self.assertEqual(_extract_target("open the item named Battery"), "battery")
+        self.assertEqual(_extract_target("افتح صفحة الأصوات والاهتزاز"), "الأصوات والاهتزاز")
+
+    def test_extract_target_keeps_arabic_phrase_whole(self) -> None:
+        # "المكالمات" alone matches call-history rows; the label is the phrase.
+        self.assertEqual(_extract_target("افتح اهتزاز المكالمات"), "اهتزاز المكالمات")
+
+
+class TestPlannerLabelTaps(unittest.TestCase):
+    """A planner that answers with a label must actually move the finger.
+
+    Coordinates were the only accepted tap payload, so every model replying
+    {"action":"tap","label":"..."} was recorded as unparsable and the loop
+    spun on the same screen until the repeat guard stopped it. A model can
+    read the tree; it cannot measure pixels, so label is the natural form.
+    """
+
+    def _driver_with_row(self) -> Any:
+        from tests.test_apex_multistep import _MultiScreenDriver
+
+        return _MultiScreenDriver()
+
+    def test_label_tap_is_executed_not_rejected(self) -> None:
+        from tests.test_apex_multistep import _TierStub
+
+        driver = self._driver_with_row()
+        # goal matches nothing on page 0, so the loop falls through to the
+        # planner, which replies with a label that does exist.
+        models = _TierStub(script=['{"action": "tap", "label": "الأصوات والاهتزاز"}'] * 3)
+        result = ApexAgent(driver, models, max_steps=4).run("افتح اهتزاز المكالمات")
+
+        self.assertIn("الأصوات والاهتزاز", driver.tapped)
+        self.assertTrue(
+            any(s.result == "tapped_by_label" for s in result.steps),
+            msg=f"label tap was not executed: {[(s.action, s.result) for s in result.steps]}",
+        )
+
+    def test_unknown_label_is_reported_not_guessed(self) -> None:
+        from tests.test_apex_multistep import _TierStub
+
+        driver = self._driver_with_row()
+        models = _TierStub(script=['{"action": "tap", "label": "nope-not-here"}'] * 3)
+        result = ApexAgent(driver, models, max_steps=4).run("افتح اهتزاز المكالمات")
+
+        self.assertEqual(driver.tapped, [], msg="must not tap an arbitrary coordinate")
+        self.assertTrue(any(s.result == "label_not_found" for s in result.steps))
 
     def test_find_candidate_match(self) -> None:
         cands = [GroundCandidate("Team", "", "", (0, 0, 10, 10), True)]
