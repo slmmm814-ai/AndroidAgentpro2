@@ -69,17 +69,16 @@ class GhostEngine(private val context: Context) {
 
             val surface = imageReader!!.surface
 
-            // PUBLIC allows other apps to launch on this display;
+            // PUBLIC allows other apps to launch on this display.
             // OWN_CONTENT_ONLY is intentionally NOT set so external apps can render.
+            // (VIRTUAL_DISPLAY_FLAG_TRUSTED is a hidden system flag, unavailable in the public SDK.)
             virtualDisplay = displayManager.createVirtualDisplay(
                 "GhostDisplay",
                 width,
                 height,
                 dpi,
                 surface,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_TRUSTED or
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY.inv()
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
             )
 
             val displayId = virtualDisplay?.display?.displayId ?: -1
