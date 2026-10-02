@@ -7,10 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.database.Cursor
-import android.hardware.battery.BatteryManager
 import android.location.Criteria
-import android.location.Location
 import android.location.LocationManager
 import android.media.AudioManager
 import android.media.session.MediaController
@@ -18,9 +15,9 @@ import android.media.session.MediaSessionManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
-import android.os.FileUtils
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
@@ -2056,19 +2053,26 @@ class BridgeServer(
     // ===== System Info Commands =====
 
     private fun executeGetBattery(request: BridgeProtocol.BridgeRequest): CommandResponse {
-        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject()
-            .put("level", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY))
-            .put("charging", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS) == BatteryManager.BATTERY_STATUS_CHARGING)
-            .put("health", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_HEALTH))
-            .put("temperature_c", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_TEMPERATURE) / 10.0)
-            .put("voltage_v", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_VOLTAGE) / 1000.0)
-            .put("technology", "Li-ion")
-        ))
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        return if (bm != null) {
+            CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject()
+                .put("level", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY))
+                .put("charging", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS) == BatteryManager.BATTERY_STATUS_CHARGING)
+                .put("health", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_HEALTH))
+                .put("temperature_c", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_TEMPERATURE) / 10.0)
+                .put("voltage_v", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_VOLTAGE) / 1000.0)
+                .put("technology", "Li-ion")
+            ))
+        } else {
+            CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "BATTERY_SERVICE_UNAVAILABLE", "BatteryManager not available"))
+        }
     }
 
     private fun executeGetLocation(request: BridgeProtocol.BridgeRequest): CommandResponse {
-        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        if (lm == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "LOCATION_SERVICE_UNAVAILABLE", "LocationManager not available"))
+        }
         val criteria = Criteria().apply { accuracy = Criteria.ACCURACY_FINE }
         val provider = lm.getBestProvider(criteria, true)
         return if (provider != null) {
@@ -2090,16 +2094,20 @@ class BridgeServer(
     }
 
     private fun executeGetNetworkInfo(request: BridgeProtocol.BridgeRequest): CommandResponse {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "CONNECTIVITY_SERVICE_UNAVAILABLE", "ConnectivityManager not available"))
+        }
         val network = cm.activeNetwork ?: return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "NO_NETWORK", "No active network"))
         val caps = cm.getNetworkCapabilities(network)
         val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
         val cellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
         val ethernet = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
         val vpn = caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        val hasInternet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
         return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject()
             .put("type", if (wifi) "wifi" else if (cellular) "cellular" else if (ethernet) "ethernet" else if (vpn) "vpn" else "unknown")
-            .put("has_internet", caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true)
+            .put("has_internet", hasInternet)
             .put("wifi", wifi)
             .put("cellular", cellular)
             .put("vpn", vpn)
@@ -2107,7 +2115,10 @@ class BridgeServer(
     }
 
     private fun executeGetClipboard(request: BridgeProtocol.BridgeRequest): CommandResponse {
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        if (cm == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "CLIPBOARD_SERVICE_UNAVAILABLE", "ClipboardManager not available"))
+        }
         return if (cm.hasPrimaryClip() && cm.primaryClipDescription.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
             val text = cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
             CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("text", text)))
@@ -2118,17 +2129,22 @@ class BridgeServer(
 
     private fun executeSetClipboard(request: BridgeProtocol.BridgeRequest): CommandResponse {
         val text = request.args.optString("text", "")
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        if (cm == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "CLIPBOARD_SERVICE_UNAVAILABLE", "ClipboardManager not available"))
+        }
         cm.setPrimaryClip(ClipData.newPlainText("bridge_clipboard", text))
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("set", true)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("set", true)))
     }
 
     private fun executeListPackages(request: BridgeProtocol.BridgeRequest): CommandResponse {
         val pm = context.packageManager
         val packages = pm.getInstalledPackages(PackageManager.GET_META_DATA)
         val arr = JSONArray()
+        val includeSystem = request.args.optBoolean("include_system", false)
         for (info in packages) {
-            if (!info.applicationInfo.flags.and(ApplicationInfo.FLAG_SYSTEM).toBoolean() || request.args.optBoolean("include_system", false)) {
+            val isSystem = (info.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            if (!isSystem || includeSystem) {
                 arr.put(JSONObject()
                     .put("package", info.packageName)
                     .put("name", pm.getApplicationLabel(info.applicationInfo).toString())
@@ -2137,7 +2153,7 @@ class BridgeServer(
                 )
             }
         }
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("packages", arr)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("packages", arr)))
     }
 
     private fun executeAppInfo(request: BridgeProtocol.BridgeRequest): CommandResponse {
@@ -2149,15 +2165,15 @@ class BridgeServer(
             val appInfo = info.applicationInfo
             CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject()
                 .put("package", pkg)
-                .put("name", pm.getApplicationLabel(appInfo).toString())
+                .put("name", pm.getApplicationLabel(info.applicationInfo).toString())
                 .put("version_name", info.versionName)
                 .put("version_code", info.versionCode)
-                .put("min_sdk", appInfo.minSdkVersion)
-                .put("target_sdk", appInfo.targetSdkVersion)
+                .put("min_sdk", info.applicationInfo.minSdkVersion)
+                .put("target_sdk", info.applicationInfo.targetSdkVersion)
                 .put("permissions", JSONArray(info.requestedPermissions ?: emptyArray()))
-                .put("flags", appInfo.flags)
-                .put("data_dir", appInfo.dataDir)
-                .put("source_dir", appInfo.sourceDir)
+                .put("flags", info.applicationInfo.flags)
+                .put("data_dir", info.applicationInfo.dataDir)
+                .put("source_dir", info.applicationInfo.sourceDir)
             ))
         } catch (e: PackageManager.NameNotFoundException) {
             CommandResponse.failure(404, BridgeProtocol.error(request.requestId, "PACKAGE_NOT_FOUND", "Package $pkg not found"))
@@ -2167,9 +2183,12 @@ class BridgeServer(
     private fun executeKillApp(request: BridgeProtocol.BridgeRequest): CommandResponse {
         val pkg = request.args.optString("package", "").trim()
         if (pkg.isEmpty()) return CommandResponse.failure(400, BridgeProtocol.error(request.requestId, "MISSING_PACKAGE", "package required"))
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        if (am == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "ACTIVITY_SERVICE_UNAVAILABLE", "ActivityManager not available"))
+        }
         am.killBackgroundProcesses(pkg)
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("killed", true).put("package", pkg)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("killed", true).put("package", pkg)))
     }
 
     private fun executeClearAppData(request: BridgeProtocol.BridgeRequest): CommandResponse {
@@ -2179,7 +2198,7 @@ class BridgeServer(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             pm.clearApplicationUserData(pkg, null)
         }
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("cleared", true).put("package", pkg)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("cleared", true).put("package", pkg)))
     }
 
     private fun executeSetBrightness(request: BridgeProtocol.BridgeRequest): CommandResponse {
@@ -2193,7 +2212,7 @@ class BridgeServer(
             Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
             Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, level)
         }
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("level", level).put("auto", auto)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("level", level).put("auto", auto)))
     }
 
     private fun executeSetVolume(request: BridgeProtocol.BridgeRequest): CommandResponse {
@@ -2209,9 +2228,12 @@ class BridgeServer(
             else -> return CommandResponse.failure(400, BridgeProtocol.error(request.requestId, "INVALID_STREAM", "stream must be: media|ring|alarm|notification|system|voice_call"))
         }
         if (level < 0) return CommandResponse.failure(400, BridgeProtocol.error(request.requestId, "INVALID_LEVEL", "level must be >= 0"))
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (am == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "AUDIO_SERVICE_UNAVAILABLE", "AudioManager not available"))
+        }
         am.setStreamVolume(streamType, level, 0)
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("stream", stream).put("level", level)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("stream", stream).put("level", level)))
     }
 
     private fun executeSetRotation(request: BridgeProtocol.BridgeRequest): CommandResponse {
@@ -2225,23 +2247,26 @@ class BridgeServer(
             Settings.System.putInt(cr, Settings.System.ACCELEROMETER_ROTATION, 0)
             Settings.System.putInt(cr, Settings.System.USER_ROTATION, rotation / 90)
         }
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("rotation", rotation)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("rotation", rotation)))
     }
 
     private fun executeToggleAirplane(request: BridgeProtocol.BridgeRequest): CommandResponse {
         val enable = request.args.optBoolean("enable", true)
         val cr = context.contentResolver
-        val mode = if (enable) Settings.Global.AIRPLANE_MODE_ON else Settings.Global.AIRPLANE_MODE_OFF
+        val mode = if (enable) 1 else 0
         Settings.Global.putInt(cr, Settings.Global.AIRPLANE_MODE_ON, mode)
         val intent = Intent(Intent.ACTION_AIRPLANE_MODE_CHANGED).putExtra("state", enable)
         context.sendBroadcast(intent)
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("enabled", enable)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("enabled", enable)))
     }
 
     private fun executeMediaControl(request: BridgeProtocol.BridgeRequest): CommandResponse {
         val action = request.args.optString("action", "").lowercase()
-        val sessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
-        val sessions = sessionManager.activeSessions(ContextCompat.getMainExecutor(context), null)
+        val sessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+        if (sessionManager == null) {
+            return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "MEDIA_SESSION_SERVICE_UNAVAILABLE", "MediaSessionManager not available"))
+        }
+        val sessions = sessionManager.activeSessions(null)
         if (sessions.isNullOrEmpty()) {
             return CommandResponse.failure(503, BridgeProtocol.error(request.requestId, "NO_SESSION", "No active media session"))
         }
@@ -2254,7 +2279,7 @@ class BridgeServer(
             "stop" -> controller.getTransportControls().stop()
             else -> return CommandResponse.failure(400, BridgeProtocol.error(request.requestId, "INVALID_ACTION", "action: play|pause|next|previous|stop"))
         }
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("action", action)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("action", action)))
     }
 
     private fun executeListFiles(request: BridgeProtocol.BridgeRequest): CommandResponse {
@@ -2271,7 +2296,7 @@ class BridgeServer(
                 .put("modified", f.lastModified())
             )
         }
-        CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("path", path).put("files", arr)))
+        return CommandResponse.success(BridgeProtocol.success(request.requestId, JSONObject().put("path", path).put("files", arr)))
     }
 
     private fun buildDataUrlIntent(url: String): Intent? {
