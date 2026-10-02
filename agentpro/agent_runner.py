@@ -181,6 +181,74 @@ class RecordingBridgeClient:
     def launch_app(self, package: str) -> FakeResponse:
         return self._record("launch_app", {"package": package})
 
+    # -- system info mocks --
+    def get_battery(self) -> FakeResponse:
+        self.calls.append(("get_battery", {}))
+        return FakeResponse(data={"level": 85, "charging": False, "health": 2, "temperature_c": 28.5, "voltage_v": 4.2})
+
+    def get_location(self) -> FakeResponse:
+        self.calls.append(("get_location", {}))
+        return FakeResponse(data={"latitude": 30.0444, "longitude": 31.2357, "accuracy": 10.0, "provider": "gps"})
+
+    def get_network_info(self) -> FakeResponse:
+        self.calls.append(("get_network_info", {}))
+        return FakeResponse(data={"type": "wifi", "has_internet": True, "wifi": True, "cellular": False})
+
+    def get_clipboard(self) -> FakeResponse:
+        self.calls.append(("get_clipboard", {}))
+        return FakeResponse(data={"text": "mock clipboard text"})
+
+    def set_clipboard(self, text: str) -> FakeResponse:
+        return self._record("set_clipboard", {"text": text})
+
+    def list_packages(self) -> FakeResponse:
+        self.calls.append(("list_packages", {}))
+        return FakeResponse(data={"packages": [{"package": "com.android.chrome", "name": "Chrome", "version_name": "120.0"}]})
+
+    def app_info(self, package: str) -> FakeResponse:
+        return self._record("app_info", {"package": package})
+
+    def kill_app(self, package: str) -> FakeResponse:
+        return self._record("kill_app", {"package": package})
+
+    def clear_app_data(self, package: str) -> FakeResponse:
+        return self._record("clear_app_data", {"package": package})
+
+    def set_brightness(self, level: int, auto: bool = False) -> FakeResponse:
+        return self._record("set_brightness", {"level": level, "auto": auto})
+
+    def set_volume(self, stream: str, level: int) -> FakeResponse:
+        return self._record("set_volume", {"stream": stream, "level": level})
+
+    def set_rotation(self, rotation: int) -> FakeResponse:
+        return self._record("set_rotation", {"rotation": rotation})
+
+    def toggle_airplane(self, enable: bool) -> FakeResponse:
+        return self._record("toggle_airplane", {"enable": enable})
+
+    def media_control(self, action: str) -> FakeResponse:
+        return self._record("media_control", {"action": action})
+
+    def list_files(self, path: str = "/sdcard/Download") -> FakeResponse:
+        return self._record("list_files", {"path": path})
+
+    def list_windows(self) -> FakeResponse:
+        self.calls.append(("list_windows", {}))
+        return FakeResponse(data={"windows": [{"package_name": "com.android.launcher3", "focused": True}]})
+
+    def node_action(self, action: str, **kwargs) -> FakeResponse:
+        return self._record("node_action", {"action": action, **kwargs})
+
+    def scrollable_node_paths(self, package: str, limit: int = 8) -> FakeResponse:
+        return self._record("scrollable_node_paths", {"package": package, "limit": limit})
+
+    def window_feed_paths(self, package: str, limit: int = 8) -> FakeResponse:
+        return self._record("window_feed_paths", {"package": package, "limit": limit})
+
+    def visual_hash(self) -> FakeResponse:
+        self.calls.append(("visual_hash", {}))
+        return FakeResponse(data={"hash": "0123456789abcdef"})
+
     @property
     def open_urls(self) -> list[str]:
         return [args["url"] for cmd, args in self.calls if cmd == "open_url"]
@@ -326,6 +394,142 @@ class BridgeActionExecutor:
                         "not dispatched directly by the runner"
                     ),
                 )
+
+            if at is ActionType.GET_BATTERY:
+                resp = self._client.get_battery()
+                return self._ok(resp)
+
+            if at is ActionType.GET_LOCATION:
+                resp = self._client.get_location()
+                return self._ok(resp)
+
+            if at is ActionType.GET_NETWORK_INFO:
+                resp = self._client.get_network_info()
+                return self._ok(resp)
+
+            if at is ActionType.GET_CLIPBOARD:
+                resp = self._client.get_clipboard()
+                return self._ok(resp)
+
+            if at is ActionType.SET_CLIPBOARD:
+                resp = self._client.set_clipboard(args.get("text", ""))
+                return self._ok(resp)
+
+            if at is ActionType.LIST_PACKAGES:
+                resp = self._client.list_packages()
+                return self._ok(resp)
+
+            if at is ActionType.APP_INFO:
+                resp = self._client.app_info(args.get("package", ""))
+                return self._ok(resp)
+
+            if at is ActionType.KILL_APP:
+                resp = self._client.kill_app(args.get("package", ""))
+                return self._ok(resp)
+
+            if at is ActionType.CLEAR_APP_DATA:
+                resp = self._client.clear_app_data(args.get("package", ""))
+                return self._ok(resp)
+
+            if at is ActionType.SET_BRIGHTNESS:
+                resp = self._client.set_brightness(args.get("level", 128), args.get("auto", False))
+                return self._ok(resp)
+
+            if at is ActionType.SET_VOLUME:
+                resp = self._client.set_volume(args.get("stream", "media"), args.get("level", 50))
+                return self._ok(resp)
+
+            if at is ActionType.SET_ROTATION:
+                resp = self._client.set_rotation(args.get("rotation", 0))
+                return self._ok(resp)
+
+            if at is ActionType.TOGGLE_AIRPLANE:
+                resp = self._client.toggle_airplane(args.get("enable", True))
+                return self._ok(resp)
+
+            if at is ActionType.MEDIA_CONTROL:
+                resp = self._client.media_control(args.get("action", "play"))
+                return self._ok(resp)
+
+            if at is ActionType.LIST_FILES:
+                resp = self._client.list_files(args.get("path", "/sdcard/Download"))
+                return self._ok(resp)
+
+            if at is ActionType.LIST_WINDOWS:
+                resp = self._client.list_windows()
+                return self._ok(resp)
+
+            if at is ActionType.NODE_ACTION:
+                action_val = args.get("action", "click")
+                kwargs = {k: v for k, v in args.items() if k != "action"}
+                resp = self._client.node_action(action_val, **kwargs)
+                return self._ok(resp)
+
+            if at is ActionType.SCROLLABLE_NODE_PATHS:
+                resp = self._client.scrollable_node_paths(args.get("package", ""), args.get("limit", 8))
+                return self._ok(resp)
+
+            if at is ActionType.WINDOW_FEED_PATHS:
+                resp = self._client.window_feed_paths(args.get("package", ""), args.get("limit", 8))
+                return self._ok(resp)
+
+            if at is ActionType.VISUAL_HASH:
+                resp = self._client.visual_hash()
+                return self._ok(resp)
+
+            if at is ActionType.TAKE_PHOTO:
+                resp = self._client.take_photo(args.get("facing", "front"))
+                return self._ok(resp)
+
+            if at is ActionType.SHIZUKU_SHELL:
+                resp = self._client.shizuku_shell(args.get("command", ""))
+                return self._ok(resp)
+
+            if at is ActionType.GHOST_START:
+                resp = self._client.ghost_start()
+                return self._ok(resp)
+
+            if at is ActionType.GHOST_STOP:
+                resp = self._client.ghost_stop()
+                return self._ok(resp)
+
+            if at is ActionType.LIST_WINDOWS:
+                resp = self._client.list_windows()
+                return self._ok(resp)
+
+            if at is ActionType.NODE_ACTION:
+                action_val = args.get("action", "click")
+                kwargs = {k: v for k, v in args.items() if k != "action"}
+                resp = self._client.node_action(action_val, **kwargs)
+                return self._ok(resp)
+
+            if at is ActionType.SCROLLABLE_NODE_PATHS:
+                resp = self._client.scrollable_node_paths(args.get("package", ""), args.get("limit", 8))
+                return self._ok(resp)
+
+            if at is ActionType.WINDOW_FEED_PATHS:
+                resp = self._client.window_feed_paths(args.get("package", ""), args.get("limit", 8))
+                return self._ok(resp)
+
+            if at is ActionType.VISUAL_HASH:
+                resp = self._client.visual_hash()
+                return self._ok(resp)
+
+            if at is ActionType.TAKE_PHOTO:
+                resp = self._client.take_photo(args.get("facing", "front"))
+                return self._ok(resp)
+
+            if at is ActionType.SHIZUKU_SHELL:
+                resp = self._client.shizuku_shell(args.get("command", ""))
+                return self._ok(resp)
+
+            if at is ActionType.GHOST_START:
+                resp = self._client.ghost_start()
+                return self._ok(resp)
+
+            if at is ActionType.GHOST_STOP:
+                resp = self._client.ghost_stop()
+                return self._ok(resp)
 
             return ActionResult(
                 success=False,

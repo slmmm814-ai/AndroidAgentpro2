@@ -1091,6 +1091,437 @@ class _GhostStopTool(Tool):
         return ActionType.GHOST_STOP
 
 
+# ===== System Info Tools =====
+
+class _GetBatteryTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="get_battery",
+                description="Get battery level, charging status, health, temperature",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.get_battery()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GET_BATTERY
+
+
+class _GetLocationTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="get_location",
+                description="Get current GPS location (latitude, longitude, accuracy)",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.get_location()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GET_LOCATION
+
+
+class _GetNetworkInfoTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="get_network_info",
+                description="Get network type (wifi/cellular), internet connectivity",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.get_network_info()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GET_NETWORK_INFO
+
+
+class _GetClipboardTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="get_clipboard",
+                description="Read text from system clipboard",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.get_clipboard()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GET_CLIPBOARD
+
+
+class _SetClipboardTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="set_clipboard",
+                description="Write text to system clipboard",
+                schema={
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {"text": {"type": "string", "description": "Text to copy"}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        text = str(args.get("text", ""))
+        return ToolResult(success=True, data=_resp_data(ctx.client.set_clipboard(text)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.SET_CLIPBOARD
+
+
+class _ListPackagesTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="list_packages",
+                description="List installed packages (user apps by default)",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "include_system": {"type": "boolean", "default": False}
+                    },
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        include_sys = bool(args.get("include_system", False))
+        return ToolResult(success=True, data=_resp_data(ctx.client.list_packages()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.LIST_PACKAGES
+
+
+class _AppInfoTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="app_info",
+                description="Get detailed info about a package",
+                schema={
+                    "type": "object",
+                    "required": ["package"],
+                    "properties": {"package": {"type": "string"}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        pkg = str(args["package"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.app_info(pkg)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.APP_INFO
+
+
+class _KillAppTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="kill_app",
+                description="Force stop an app",
+                schema={
+                    "type": "object",
+                    "required": ["package"],
+                    "properties": {"package": {"type": "string"}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        pkg = str(args["package"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.kill_app(pkg)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.KILL_APP
+
+
+class _ClearAppDataTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="clear_app_data",
+                description="Clear app data/cache (requires confirmation)",
+                schema={
+                    "type": "object",
+                    "required": ["package"],
+                    "properties": {"package": {"type": "string"}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        pkg = str(args["package"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.clear_app_data(pkg)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.CLEAR_APP_DATA
+
+
+class _SetBrightnessTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="set_brightness",
+                description="Set screen brightness (0-255) or auto",
+                schema={
+                    "type": "object",
+                    "required": ["level"],
+                    "properties": {
+                        "level": {"type": "integer", "minimum": 0, "maximum": 255},
+                        "auto": {"type": "boolean", "default": False},
+                    },
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        level = int(args["level"])
+        auto = bool(args.get("auto", False))
+        return ToolResult(success=True, data=_resp_data(ctx.client.set_brightness(level, auto)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.SET_BRIGHTNESS
+
+
+class _SetVolumeTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="set_volume",
+                description="Set volume for a stream",
+                schema={
+                    "type": "object",
+                    "required": ["stream", "level"],
+                    "properties": {
+                        "stream": {"type": "string", "enum": ["media", "ring", "alarm", "notification", "system", "voice_call"]},
+                        "level": {"type": "integer", "minimum": 0},
+                    },
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        stream = str(args["stream"])
+        level = int(args["level"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.set_volume(stream, level)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.SET_VOLUME
+
+
+class _SetRotationTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="set_rotation",
+                description="Set screen rotation (0, 90, 180, 270, -1 for auto)",
+                schema={
+                    "type": "object",
+                    "required": ["rotation"],
+                    "properties": {"rotation": {"type": "integer", "enum": [0, 90, 180, 270, -1]}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        rotation = int(args["rotation"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.set_rotation(rotation)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.SET_ROTATION
+
+
+class _ToggleAirplaneTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="toggle_airplane",
+                description="Toggle airplane mode (requires root/Shizuku)",
+                schema={
+                    "type": "object",
+                    "properties": {"enable": {"type": "boolean", "default": True}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        enable = bool(args.get("enable", True))
+        return ToolResult(success=True, data=_resp_data(ctx.client.toggle_airplane(enable)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.TOGGLE_AIRPLANE
+
+
+class _MediaControlTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="media_control",
+                description="Control media playback (play, pause, next, previous, stop)",
+                schema={
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {"action": {"type": "string", "enum": ["play", "pause", "next", "previous", "stop"]}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        action = str(args["action"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.media_control(action)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.MEDIA_CONTROL
+
+
+class _ListFilesTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="list_files",
+                description="List files in a directory",
+                schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "default": "/sdcard/Download"}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        path = str(args.get("path", "/sdcard/Download"))
+        return ToolResult(success=True, data=_resp_data(ctx.client.list_files(path)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.LIST_FILES
+
+
+class _ListWindowsTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="list_windows",
+                description="List all visible windows",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.list_windows()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.LIST_WINDOWS
+
+
+class _NodeActionTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="node_action",
+                description="Perform accessibility action on a node",
+                schema={
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["click", "long_click", "scroll_forward", "scroll_backward", "set_text", "focus", "clear_focus", "select"]},
+                        "package": {"type": "string"},
+                        "resource_id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "content_description": {"type": "string"},
+                        "class_name": {"type": "string"},
+                        "match_index": {"type": "integer", "default": 0},
+                        "text_argument": {"type": "string"},
+                    },
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        action = str(args["action"])
+        kwargs = {k: v for k, v in args.items() if k != "action"}
+        return ToolResult(success=True, data=_resp_data(ctx.client.node_action(action, **kwargs)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.NODE_ACTION
+
+
+class _ScrollableNodePathsTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="scrollable_node_paths",
+                description="Find scrollable containers in a package",
+                schema={
+                    "type": "object",
+                    "required": ["package"],
+                    "properties": {"package": {"type": "string"}, "limit": {"type": "integer", "default": 8}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        pkg = str(args["package"])
+        limit = int(args.get("limit", 8))
+        return ToolResult(success=True, data=_resp_data(ctx.client.scrollable_node_paths(pkg, limit=limit)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.SCROLLABLE_NODE_PATHS
+
+
+class _WindowFeedPathsTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="window_feed_paths",
+                description="Find feed RecyclerViews in a package window",
+                schema={
+                    "type": "object",
+                    "required": ["package"],
+                    "properties": {"package": {"type": "string"}, "limit": {"type": "integer", "default": 8}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        pkg = str(args["package"])
+        limit = int(args.get("limit", 8))
+        return ToolResult(success=True, data=_resp_data(ctx.client.window_feed_paths(pkg, limit=limit)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.WINDOW_FEED_PATHS
+
+
+class _VisualHashTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="visual_hash",
+                description="Get perceptual hash of current screen",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.visual_hash()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.VISUAL_HASH
+
+
 class _WaitTool(Tool):
     def __init__(self) -> None:
         super().__init__(
@@ -1331,6 +1762,26 @@ def build_default_registry(
     registry.register(_ShizukuShellTool())
     registry.register(_GhostStartTool())
     registry.register(_GhostStopTool())
+    registry.register(_GetBatteryTool())
+    registry.register(_GetLocationTool())
+    registry.register(_GetNetworkInfoTool())
+    registry.register(_GetClipboardTool())
+    registry.register(_SetClipboardTool())
+    registry.register(_ListPackagesTool())
+    registry.register(_AppInfoTool())
+    registry.register(_KillAppTool())
+    registry.register(_ClearAppDataTool())
+    registry.register(_SetBrightnessTool())
+    registry.register(_SetVolumeTool())
+    registry.register(_SetRotationTool())
+    registry.register(_ToggleAirplaneTool())
+    registry.register(_MediaControlTool())
+    registry.register(_ListFilesTool())
+    registry.register(_ListWindowsTool())
+    registry.register(_NodeActionTool())
+    registry.register(_ScrollableNodePathsTool())
+    registry.register(_WindowFeedPathsTool())
+    registry.register(_VisualHashTool())
     registry.register(_WaitTool())
     registry.register(_WaitForTextTool())
     registry.register(_WaitForScreenStableTool())

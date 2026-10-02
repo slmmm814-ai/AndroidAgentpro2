@@ -547,6 +547,81 @@ class BridgeClient:
 
         return self.command("launch_app", {"package": package})
 
+    # -- system info commands -------------------------------------------- #
+
+    def get_battery(self) -> BridgeResponse:
+        return self.command("get_battery")
+
+    def get_location(self) -> BridgeResponse:
+        return self.command("get_location")
+
+    def get_network_info(self) -> BridgeResponse:
+        return self.command("get_network_info")
+
+    def get_clipboard(self) -> BridgeResponse:
+        return self.command("get_clipboard")
+
+    def set_clipboard(self, text: str) -> BridgeResponse:
+        if not isinstance(text, str):
+            raise BridgeConfigurationError("set_clipboard text must be a string")
+        return self.command("set_clipboard", {"text": text})
+
+    def list_packages(self) -> BridgeResponse:
+        return self.command("list_packages")
+
+    def app_info(self, package: str) -> BridgeResponse:
+        if not isinstance(package, str) or not package.strip():
+            raise BridgeConfigurationError("app_info package must be non-empty")
+        return self.command("app_info", {"package": package.strip()})
+
+    def kill_app(self, package: str) -> BridgeResponse:
+        if not isinstance(package, str) or not package.strip():
+            raise BridgeConfigurationError("kill_app package must be non-empty")
+        return self.command("kill_app", {"package": package.strip()})
+
+    def clear_app_data(self, package: str) -> BridgeResponse:
+        if not isinstance(package, str) or not package.strip():
+            raise BridgeConfigurationError("clear_app_data package must be non-empty")
+        return self.command("clear_app_data", {"package": package.strip()})
+
+    def set_brightness(self, level: int, auto: bool = False) -> BridgeResponse:
+        if not isinstance(level, int) or not (0 <= level <= 255):
+            raise BridgeConfigurationError("set_brightness level must be 0-255")
+        return self.command("set_brightness", {"level": level, "auto": auto})
+
+    def set_volume(self, stream: str, level: int) -> BridgeResponse:
+        valid_streams = ("media", "ring", "alarm", "notification", "system", "voice_call")
+        if stream not in valid_streams:
+            raise BridgeConfigurationError(f"set_volume stream must be one of {valid_streams}")
+        if not isinstance(level, int) or level < 0:
+            raise BridgeConfigurationError("set_volume level must be non-negative integer")
+        return self.command("set_volume", {"stream": stream, "level": level})
+
+    def set_rotation(self, rotation: int) -> BridgeResponse:
+        valid = (0, 90, 180, 270, -1)  # -1 = auto
+        if rotation not in valid:
+            raise BridgeConfigurationError(f"set_rotation must be one of {valid}")
+        return self.command("set_rotation", {"rotation": rotation})
+
+    def toggle_airplane(self, enable: bool) -> BridgeResponse:
+        return self.command("toggle_airplane", {"enable": enable})
+
+    def media_control(self, action: str) -> BridgeResponse:
+        valid = ("play", "pause", "next", "previous", "stop")
+        action = action.lower().strip()
+        if action not in valid:
+            raise BridgeConfigurationError(f"media_control action must be one of {valid}")
+        return self.command("media_control", {"action": action})
+
+    def list_files(self, path: str = "/sdcard/Download") -> BridgeResponse:
+        if not isinstance(path, str) or not path.strip():
+            raise BridgeConfigurationError("list_files path must be non-empty")
+        return self.command("list_files", {"path": path.strip()})
+
+    def list_windows(self) -> BridgeResponse:
+        """List every interactive window currently visible to the service."""
+        return self.command("list_windows")
+
     # -- multi-window / node-action API -------------------------------- #
     #
     # These commands address a *specific* window by package and drive it
