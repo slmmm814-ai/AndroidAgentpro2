@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -32,6 +33,8 @@ class ForegroundWatchdogService : Service() {
             "com.ai.agentpro.action.WATCHDOG_START"
         private const val ACTION_STOP =
             "com.ai.agentpro.action.WATCHDOG_STOP"
+        private const val ACTION_START_MEDIA_PROJECTION =
+            "com.ai.agentpro.action.WATCHDOG_START_MEDIA_PROJECTION"
 
         private const val WATCHDOG_INTERVAL_SECONDS = 15L
         private const val BRIDGE_RESTART_COOLDOWN_MS = 30_000L
@@ -56,7 +59,33 @@ class ForegroundWatchdogService : Service() {
             } catch (exception: Exception) {
                 Log.e(
                     TAG,
-                    "Unable to start watchdog service",
+                    "Unable to start watchdog service",                    exception
+                )
+            }
+        }
+
+        /**
+         * Restart the watchdog foreground service including the
+         * mediaProjection type so MediaProjection virtual displays are allowed.
+         */
+        fun startForMediaProjection(context: Context) {
+            val intent = Intent(
+                context,
+                ForegroundWatchdogService::class.java
+            ).setAction(ACTION_START_MEDIA_PROJECTION)
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+
+                Log.i(TAG, "Watchdog start (mediaProjection) requested")
+            } catch (exception: Exception) {
+                Log.e(
+                    TAG,
+                    "Unable to start watchdog service (mediaProjection)",
                     exception
                 )
             }
@@ -149,12 +178,21 @@ class ForegroundWatchdogService : Service() {
             }
 
             ACTION_START,
+            ACTION_START_MEDIA_PROJECTION,
             null -> {
                 if (!serviceRunning.get()) {
                     try {
                         startForeground(
                             NOTIFICATION_ID,
-                            createNotification()
+                            createNotification(),
+                            if (intent?.action == ACTION_START_MEDIA_PROJECTION &&
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+                            ) {
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                            } else {
+                                0
+                            }
                         )
 
                         serviceRunning.set(true)

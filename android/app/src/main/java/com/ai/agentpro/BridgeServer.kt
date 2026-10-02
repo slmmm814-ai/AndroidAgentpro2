@@ -730,6 +730,9 @@ class BridgeServer(
         val projectionResult = GhostProjectionHolder.resultCode
 
         val displayId = if (projectionData != null && projectionResult == android.app.Activity.RESULT_OK) {
+            // MediaProjection requires a foreground service of type mediaProjection.
+            ForegroundWatchdogService.startForMediaProjection(context)
+            Thread.sleep(400)
             engine.createGhostDisplay(resultCode = projectionResult, data = projectionData)
         } else {
             engine.createGhostDisplay()
