@@ -129,8 +129,7 @@ class MainActivity : Activity() {
 
         if (requestCode == GHOST_PROJECTION_REQUEST) {
             if (resultCode == RESULT_OK && data != null) {
-                GhostProjectionHolder.resultCode = resultCode
-                GhostProjectionHolder.data = data
+                GhostProjectionHolder.save(this, resultCode, data)
                 toast("تم منح إذن الشبح ✅")
             } else {
                 toast("تم رفض إذن الشبح")
@@ -150,8 +149,42 @@ class MainActivity : Activity() {
 
 /**
  * Holds the MediaProjection consent result until the bridge asks for it.
+ * Persisted to SharedPreferences so it survives process death.
  */
 object GhostProjectionHolder {
+    private const val PREFS = "ghost_projection"
+    private const val KEY_RESULT = "result_code"
+    private const val KEY_DATA = "data_intent"
+
     @Volatile var resultCode: Int = android.app.Activity.RESULT_CANCELED
     @Volatile var data: Intent? = null
+
+    fun save(context: Context, code: Int, intent: Intent) {
+        resultCode = code
+        data = intent
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_RESULT, code)
+                .putString(KEY_DATA, intent.toUri(0))
+                .apply()
+        } catch (e: Exception) {
+            Log.e("AndroidAgentPro.Ghost", "Failed to persist projection token", e)
+        }
+    }
+
+    fun load(context: Context) {
+        if (data != null) return
+        try {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val code = prefs.getInt(KEY_RESULT, android.app.Activity.RESULT_CANCELED)
+            val uri = prefs.getString(KEY_DATA, null)
+            if (code == android.app.Activity.RESULT_OK && uri != null) {
+                resultCode = code
+                data = Intent.parseUri(uri, 0)
+            }
+        } catch (e: Exception) {
+            Log.e("AndroidAgentPro.Ghost", "Failed to load projection token", e)
+        }
+    }
 }

@@ -726,6 +726,7 @@ class BridgeServer(
         val engine = GhostEngine.getInstance(context)
 
         // If a projection token was already captured via the UI button, reuse it.
+        GhostProjectionHolder.load(context)
         val projectionData = GhostProjectionHolder.data
         val projectionResult = GhostProjectionHolder.resultCode
 
