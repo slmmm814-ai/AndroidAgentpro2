@@ -69,12 +69,19 @@ class GhostEngine(private val context: Context) {
                 return -1
             }
 
+            readerThread = HandlerThread("GhostImageReader").also { it.start() }
+            readerHandler = Handler(readerThread!!.looper)
+
             val projectionManager =
                 context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = projectionManager.getMediaProjection(resultCode, data)
 
-            readerThread = HandlerThread("GhostImageReader").also { it.start() }
-            readerHandler = Handler(readerThread!!.looper)
+            // Android 14+ requires a callback to be registered before capture starts.
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.i(TAG, "MediaProjection stopped")
+                }
+            }, readerHandler)
 
             imageReader = ImageReader.newInstance(
                 width,
