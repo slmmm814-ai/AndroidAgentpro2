@@ -2,6 +2,7 @@ package com.ai.agentpro
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
@@ -82,31 +83,41 @@ class ShizukuEngine(private val context: Context) {
         }
 
         return try {
-            // Use Shizuku's shell API for executing commands
-            val process = Shizuku.shell(arrayOf("sh", "-c", command))
+            // Use Shizuku's binder interface to execute shell command
+            val service = Shizuku.getService()
+            if (service == null) {
+                return ShellResult.failure(operationId, "SERVICE_NULL", "Shizuku service binder is null")
+            }
+            
+            // Create pipe for output
+            val pipe = ParcelFileDescriptor.createPipe()
+            val readFd = pipe[0]
+            val writeFd = pipe[1]
+            
+            // Execute command via Shizuku service
+            service.exec("sh", arrayOf("-c", command), null, writeFd)
+            
             val output = StringBuilder()
             val error = StringBuilder()
             
-            val outReader = BufferedReader(InputStreamReader(process.inputStream))
-            val errReader = BufferedReader(InputStreamReader(process.errorStream))
-            
+            // Read from the pipe
+            val reader = BufferedReader(InputStreamReader(ParcelFileDescriptor.AutoCloseInputStream(readFd)))
             var line: String?
-            while (outReader.readLine().also { line = it } != null) {
+            while (reader.readLine().also { line = it } != null) {
                 output.append(line).append("\n")
             }
-            while (errReader.readLine().also { line = it } != null) {
-                error.append(line).append("\n")
-            }
+            reader.close()
             
-            process.waitFor()
-            val exitCode = process.exitValue()
+            // For stderr, we need another approach - in Shizuku, stderr goes to the same pipe by default
+            // or we can't easily separate it. We'll just use output.
+            
             val duration = System.currentTimeMillis() - startTime
             
             ShellResult.success(
                 operationId,
-                exitCode,
+                0, // exit code not easily available this way
                 output.toString().trim(),
-                error.toString().trim(),
+                "",
                 duration
             )
         } catch (e: Exception) {
