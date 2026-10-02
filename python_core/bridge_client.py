@@ -332,6 +332,10 @@ class BridgeClient:
         """Stop Ghost Mode (release virtual display)."""
         return self.command("ghost_stop")
 
+    def ghost_screenshot(self, *, quality: int = 80) -> BridgeResponse:
+        """Capture the ghost (virtual) display as base64 JPEG."""
+        return self.command("ghost_screenshot", {"quality": int(quality)})
+
     def screenshot(self, *, retries: int = 2) -> BridgeResponse:
         """Capture the screen; the response carries a base64 PNG.
 

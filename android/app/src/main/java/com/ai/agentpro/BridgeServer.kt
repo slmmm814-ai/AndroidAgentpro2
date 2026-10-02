@@ -433,6 +433,7 @@ class BridgeServer(
 
                 "ghost_start" -> executeGhostStart(request)
                 "ghost_stop" -> executeGhostStop(request)
+                "ghost_screenshot" -> executeGhostScreenshot(request)
 
                 "visual_hash" -> executeVisualHash(request)
 
@@ -742,6 +743,48 @@ class BridgeServer(
         return CommandResponse.success(
             BridgeProtocol.success(request.requestId, JSONObject().put("status", "STOPPED"))
         )
+    }
+
+    private fun executeGhostScreenshot(request: BridgeProtocol.BridgeRequest): CommandResponse {
+        val engine = GhostEngine.getInstance(context)
+
+        if (!engine.isGhostModeActive()) {
+            return CommandResponse.failure(
+                400,
+                BridgeProtocol.error(request.requestId, "GHOST_NOT_ACTIVE", "Ghost mode is not active")
+            )
+        }
+
+        val quality = request.args.optInt("quality", 80)
+
+        return try {
+            val jpegBytes = engine.captureGhostDisplay(quality)
+
+            if (jpegBytes == null) {
+                return CommandResponse.failure(
+                    500,
+                    BridgeProtocol.error(request.requestId, "GHOST_CAPTURE_FAILED", "No frame available yet")
+                )
+            }
+
+            val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject()
+                        .put("base64", base64)
+                        .put("byte_count", jpegBytes.size)
+                        .put("display_id", engine.getGhostDisplayId())
+                )
+            )
+        } catch (exception: Exception) {
+            Log.e(TAG, "ghost_screenshot failed", exception)
+            CommandResponse.failure(
+                500,
+                BridgeProtocol.error(request.requestId, "GHOST_CAPTURE_FAILED", exception.message ?: "Capture error")
+            )
+        }
     }
 
     private fun executeTap(
