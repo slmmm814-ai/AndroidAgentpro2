@@ -87,15 +87,12 @@ class GhostEngine(private val context: Context) {
                 width,
                 height,
                 PixelFormat.RGBA_8888,
-                2
+                3
             )
 
-            imageReader?.setOnImageAvailableListener({ reader ->
-                try {
-                    reader.acquireLatestImage()?.close()
-                } catch (_: Exception) {
-                }
-            }, readerHandler)
+            // NOTE: no OnImageAvailableListener here - we must NOT drain frames,
+            // otherwise captureGhostDisplay() finds nothing. The reader buffers up
+            // to `maxImages` frames and acquireLatestImage() returns the newest one.
 
             val surface = imageReader!!.surface
 
