@@ -74,10 +74,31 @@ class MainActivity : Activity() {
             }
         }
 
+        val shizukuButton = Button(this).apply {
+            text = "تفعيل صلاحيات النظام (Shizuku)"
+            setOnClickListener {
+                val engine = ShizukuEngine.getInstance(applicationContext)
+                if (!engine.isServiceAvailable()) {
+                    status.text = "خدمة Shizuku غير مشغلة! يرجى تشغيل تطبيق Shizuku أولاً."
+                } else if (engine.hasPermission()) {
+                    status.text = "صلاحيات Shizuku مفعلة بالفعل ✅"
+                } else {
+                    // Shizuku logic is async, we just trigger the request
+                    try {
+                        rikka.shizuku.Shizuku.requestPermission(1001)
+                        status.text = "تم طلب صلاحية Shizuku..."
+                    } catch (e: Exception) {
+                        status.text = "فشل طلب الصلاحية: ${e.message}"
+                    }
+                }
+            }
+        }
+
         root.addView(title)
         root.addView(status)
         root.addView(accessibilityButton)
         root.addView(copyTokenButton)
+        root.addView(shizukuButton)
 
         setContentView(root)
     }

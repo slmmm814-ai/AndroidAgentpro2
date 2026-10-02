@@ -126,22 +126,25 @@ def main(argv: list[str] | None = None) -> int:
     all_posts: list[dict] = []
     scrolls = 0
 
-    # Read what is already on screen before scrolling.
+    # Reading never requires scrolling: the tree already holds everything
+    # visible. Collect first, scroll only to see what is further down.
     all_posts.extend(_dedupe(_collect_posts(driver, package), seen))
 
     while scrolls < args.max_scrolls:
         if args.kill_file and os.path.exists(args.kill_file):
             break
 
-        scroll = driver.physics().scroll_once("down")
-
-        if not scroll.moved_on_last_fling:
-            break
-
+        before_count = len(seen)
+        driver.physics().scroll_once("up")
         scrolls += 1
         time.sleep(max(0.5, args.settle_seconds))
 
         all_posts.extend(_dedupe(_collect_posts(driver, package), seen))
+
+        # Progress is "new unique labels appeared", not a fingerprint change:
+        # a scroll that lands on an already-seen screen is a real dead end.
+        if len(seen) == before_count:
+            break
 
     elapsed = time.monotonic() - started
 

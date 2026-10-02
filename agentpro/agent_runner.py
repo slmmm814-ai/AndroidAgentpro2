@@ -101,6 +101,22 @@ class RecordingBridgeClient:
             }
         )
 
+    def shizuku_status(self) -> FakeResponse:
+        self.calls.append(("shizuku_status", {}))
+        return FakeResponse(data={"available": True, "has_permission": True})
+
+    def shizuku_shell(self, command: str) -> FakeResponse:
+        self.calls.append(("shizuku_shell", {"command": command}))
+        return FakeResponse(data={"exit_code": 0, "output": "mock output", "error": ""})
+
+    def ghost_start(self) -> FakeResponse:
+        self.calls.append(("ghost_start", {}))
+        return FakeResponse(data={"display_id": 2, "status": "ACTIVE"})
+
+    def ghost_stop(self) -> FakeResponse:
+        self.calls.append(("ghost_stop", {}))
+        return FakeResponse(data={"status": "STOPPED"})
+
     def tap(self, x: float, y: float) -> FakeResponse:
         return self._record("tap", {"x": x, "y": y})
 

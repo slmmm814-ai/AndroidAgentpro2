@@ -426,7 +426,13 @@ class BridgeServer(
 
                 "screenshot" -> executeScreenshot(request)
 
-                "camera_capture", "take_photo" -> executeCameraCapture(request)
+                "camera_capture",                 "take_photo" -> executeCameraCapture(request)
+
+                "shizuku_status" -> executeShizukuStatus(request)
+                "shizuku_shell" -> executeShizukuShell(request)
+
+                "ghost_start" -> executeGhostStart(request)
+                "ghost_stop" -> executeGhostStop(request)
 
                 "visual_hash" -> executeVisualHash(request)
 
@@ -668,6 +674,73 @@ class BridgeServer(
                     .put("base64", result.base64)
                     .put("elapsed_ms", result.elapsedMs)
             )
+        )
+    }
+
+    private fun executeShizukuStatus(request: BridgeProtocol.BridgeRequest): CommandResponse {
+        val engine = ShizukuEngine.getInstance(context)
+        val available = engine.isServiceAvailable()
+        val hasPermission = engine.hasPermission()
+        
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject()
+                    .put("available", available)
+                    .put("has_permission", hasPermission)
+            )
+        )
+    }
+
+    private fun executeShizukuShell(request: BridgeProtocol.BridgeRequest): CommandResponse {
+        val command = request.args.optString("command", "")
+        if (command.isBlank()) {
+            return CommandResponse.failure(400, BridgeProtocol.error(request.requestId, "INVALID_ARGS", "command is required"))
+        }
+
+        val engine = ShizukuEngine.getInstance(context)
+        val result = engine.execShell(command)
+
+        if (!result.success) {
+            return CommandResponse.failure(
+                503,
+                BridgeProtocol.error(request.requestId, result.errorCode ?: "SHIZUKU_ERROR", result.message ?: "Execution failed")
+            )
+        }
+
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject()
+                    .put("operation_id", result.operationId)
+                    .put("exit_code", result.exitCode)
+                    .put("output", result.output)
+                    .put("error", result.error)
+                    .put("elapsed_ms", result.elapsedMs)
+            )
+        )
+    }
+
+    private fun executeGhostStart(request: BridgeProtocol.BridgeRequest): CommandResponse {
+        val engine = GhostEngine.getInstance(context)
+        val displayId = engine.createGhostDisplay()
+        
+        return if (displayId != -1) {
+            CommandResponse.success(
+                BridgeProtocol.success(
+                    request.requestId,
+                    JSONObject().put("display_id", displayId).put("status", "ACTIVE")
+                )
+            )
+        } else {
+            CommandResponse.failure(500, BridgeProtocol.error(request.requestId, "GHOST_INIT_FAILED", "Could not create virtual display"))
+        }
+    }
+
+    private fun executeGhostStop(request: BridgeProtocol.BridgeRequest): CommandResponse {
+        GhostEngine.getInstance(context).releaseGhostDisplay()
+        return CommandResponse.success(
+            BridgeProtocol.success(request.requestId, JSONObject().put("status", "STOPPED"))
         )
     }
 
@@ -1890,6 +1963,21 @@ class BridgeServer(
                     "launch_app requires a non-empty package"
                 )
             )
+        }
+
+        val ghostEngine = GhostEngine.getInstance(context)
+        val shizukuEngine = ShizukuEngine.getInstance(context)
+
+        if (ghostEngine.isGhostModeActive() && shizukuEngine.hasPermission()) {
+            val displayId = ghostEngine.getGhostDisplayId()
+            val cmd = "am start --display $displayId $pkg"
+            val res = shizukuEngine.execShell(cmd)
+            
+            if (res.success) {
+                return CommandResponse.success(
+                    BridgeProtocol.success(request.requestId, JSONObject().put("launched_on_ghost", true).put("display_id", displayId))
+                )
+            }
         }
 
         return try {

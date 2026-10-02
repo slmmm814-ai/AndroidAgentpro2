@@ -1030,6 +1030,67 @@ class _TakePhotoTool(Tool):
         return ActionType.TAKE_PHOTO
 
 
+class _ShizukuShellTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="shizuku_shell",
+                description="Execute a shell command with ADB-level permissions via Shizuku",
+                schema={
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command to execute (e.g., 'pm list packages', 'dumpsys battery')",
+                        }
+                    },
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        cmd = str(args["command"])
+        return ToolResult(success=True, data=_resp_data(ctx.client.shizuku_shell(cmd)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.SHIZUKU_SHELL
+
+
+class _GhostStartTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="ghost_start",
+                description="Start Ghost Mode: create a virtual display for background operations",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.ghost_start()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GHOST_START
+
+
+class _GhostStopTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="ghost_stop",
+                description="Stop Ghost Mode: release the virtual display",
+                schema={"type": "object", "properties": {}},
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        return ToolResult(success=True, data=_resp_data(ctx.client.ghost_stop()))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GHOST_STOP
+
+
 class _WaitTool(Tool):
     def __init__(self) -> None:
         super().__init__(
@@ -1267,6 +1328,9 @@ def build_default_registry(
     registry.register(_DumpUiTool())
     registry.register(_ScreenshotTool())
     registry.register(_TakePhotoTool())
+    registry.register(_ShizukuShellTool())
+    registry.register(_GhostStartTool())
+    registry.register(_GhostStopTool())
     registry.register(_WaitTool())
     registry.register(_WaitForTextTool())
     registry.register(_WaitForScreenStableTool())

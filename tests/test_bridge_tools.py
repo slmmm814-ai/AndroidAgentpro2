@@ -44,6 +44,9 @@ class RegistryTests(unittest.TestCase):
             "dump_ui",
             "screenshot",
             "take_photo",
+            "shizuku_shell",
+            "ghost_start",
+            "ghost_stop",
             "wait",
             "wait_for_text",
             "wait_for_screen_stable",
@@ -74,6 +77,9 @@ class RegistryTests(unittest.TestCase):
             "open_url": ActionType.OPEN_URL,
             "get_window_info": ActionType.GET_WINDOW,
             "take_photo": ActionType.TAKE_PHOTO,
+            "shizuku_shell": ActionType.SHIZUKU_SHELL,
+            "ghost_start": ActionType.GHOST_START,
+            "ghost_stop": ActionType.GHOST_STOP,
         }
         for name, expected in mappings.items():
             self.assertEqual(registry.get(name).to_action_type(), expected)

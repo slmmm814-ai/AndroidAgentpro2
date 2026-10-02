@@ -188,6 +188,15 @@ class BridgeClientValidationTests(unittest.TestCase):
         with self.assertRaises(BridgeConfigurationError):
             self.client.take_photo("invalid_facing")
 
+    def test_shizuku_shell_empty_rejected(self) -> None:
+        with self.assertRaises(BridgeConfigurationError):
+            self.client.shizuku_shell("")
+
+    def test_shizuku_shell_sends_command(self) -> None:
+        self.client.shizuku_shell("ls")
+        self.assertEqual(self.client.last_request["command"], "shizuku_shell")
+        self.assertEqual(self.client.last_request["args"]["command"], "ls")
+
 
 if __name__ == "__main__":
     unittest.main()

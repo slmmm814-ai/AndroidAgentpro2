@@ -39,6 +39,9 @@ class ActionType(str, Enum):
     ERASE_TEXT = "erase_text"
     GET_WINDOW = "get_window"
     TAKE_PHOTO = "take_photo"
+    SHIZUKU_SHELL = "shizuku_shell"
+    GHOST_START = "ghost_start"
+    GHOST_STOP = "ghost_stop"
     MCP_CALL = "mcp_call"
 
 

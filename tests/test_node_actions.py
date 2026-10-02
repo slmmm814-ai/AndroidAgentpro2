@@ -142,22 +142,60 @@ class FeedPathTests(unittest.TestCase):
         paths = client.scrollable_node_paths("p")
         self.assertEqual(paths, [[0], [1]])
 
-    def test_window_feed_paths_filters_to_recyclerview(self) -> None:
+    def test_window_feed_paths_prefers_clips_pager(self) -> None:
         tree = {
             "class_name": "root",
             "scrollable": False,
             "children": [
                 {
                     "class_name": "androidx.recyclerview.widget.RecyclerView",
+                    "view_id_resource_name": "android:id/list",
                     "scrollable": True,
                     "children": [],
                 },
-                {"class_name": "android.widget.ScrollView", "scrollable": True},
+                {
+                    "class_name": "androidx.viewpager.widget.ViewPager",
+                    "view_id_resource_name":
+                        "com.instagram.android:id/clips_viewer_view_pager",
+                    "scrollable": True,
+                    "children": [],
+                },
+                {
+                    "class_name": "androidx.recyclerview.widget.RecyclerView",
+                    "view_id_resource_name":
+                        "com.instagram.android:id/recycler_view",
+                    "scrollable": True,
+                    "children": [],
+                },
             ],
         }
         client = self._client_with_tree(tree)
         paths = client.window_feed_paths("p")
-        self.assertEqual(paths, [[0]])
+        # clips pager first, then the vertical feed list; the horizontal
+        # android:id/list carousel is excluded
+        self.assertEqual(
+            paths,
+            [
+                [1],
+                [2],
+            ],
+        )
+
+    def test_window_feed_paths_keeps_plain_recyclers(self) -> None:
+        tree = {
+            "class_name": "root",
+            "scrollable": False,
+            "children": [
+                {
+                    "class_name": "androidx.recyclerview.widget.RecyclerView",
+                    "view_id_resource_name": "androidx.recyclerview:id/list",
+                    "scrollable": True,
+                    "children": [],
+                },
+            ],
+        }
+        client = self._client_with_tree(tree)
+        self.assertEqual(client.window_feed_paths("p"), [[0]])
 
     def test_window_feed_paths_empty_when_no_root(self) -> None:
         client = FakeBridgeClient(data={})

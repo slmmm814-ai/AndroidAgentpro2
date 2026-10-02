@@ -314,6 +314,24 @@ class BridgeClient:
             )
         return self.command("take_photo", {"facing": facing_clean})
 
+    def shizuku_status(self) -> BridgeResponse:
+        """Check if Shizuku service is available and has permission."""
+        return self.command("shizuku_status")
+
+    def shizuku_shell(self, command: str) -> BridgeResponse:
+        """Execute a shell command via Shizuku (ADB-level access)."""
+        if not isinstance(command, str) or not command.strip():
+            raise BridgeConfigurationError("shizuku_shell command must be a non-empty string")
+        return self.command("shizuku_shell", {"command": command.strip()})
+
+    def ghost_start(self) -> BridgeResponse:
+        """Start Ghost Mode (create virtual display)."""
+        return self.command("ghost_start")
+
+    def ghost_stop(self) -> BridgeResponse:
+        """Stop Ghost Mode (release virtual display)."""
+        return self.command("ghost_stop")
+
     def screenshot(self, *, retries: int = 2) -> BridgeResponse:
         """Capture the screen; the response carries a base64 PNG.
 
