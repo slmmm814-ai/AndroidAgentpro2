@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -128,14 +129,18 @@ class MainActivity : Activity() {
 
         if (requestCode == GHOST_PROJECTION_REQUEST) {
             if (resultCode == RESULT_OK && data != null) {
-                // Hand the projection token to the ghost engine
                 GhostProjectionHolder.resultCode = resultCode
                 GhostProjectionHolder.data = data
-                status.text = "تم منح إذن الشبح ✅ اضغط مرة أخرى لتفعيله"
+                toast("تم منح إذن الشبح ✅")
             } else {
-                status.text = "تم رفض إذن الشبح"
+                toast("تم رفض إذن الشبح")
             }
         }
+    }
+
+    private fun toast(message: String) {
+        android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+        Log.i("AndroidAgentPro.Main", message)
     }
 
     companion object {
