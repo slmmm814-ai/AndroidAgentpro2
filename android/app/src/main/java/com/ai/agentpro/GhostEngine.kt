@@ -64,24 +64,35 @@ class GhostEngine(private val context: Context) {
         }
 
         try {
-            if (data == null || resultCode != Activity.RESULT_OK) {
-                Log.e(TAG, "MediaProjection consent missing; cannot host other apps")
-                return -1
-            }
-
-            readerThread = HandlerThread("GhostImageReader").also { it.start() }
-            readerHandler = Handler(readerThread!!.looper)
-
-            val projectionManager =
-                context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjection = projectionManager.getMediaProjection(resultCode, data)
-
-            // Android 14+ requires a callback to be registered before capture starts.
-            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    Log.i(TAG, "MediaProjection stopped")
+            // Reuse an already-live MediaProjection if we have one; Android forbids
+            // re-using the consent Intent, so we must hold on to the instance.
+            if (mediaProjection == null) {
+                if (data == null || resultCode != Activity.RESULT_OK) {
+                    Log.e(TAG, "MediaProjection consent missing; cannot host other apps")
+                    return -1
                 }
-            }, readerHandler)
+
+                readerThread = HandlerThread("GhostImageReader").also { it.start() }
+                readerHandler = Handler(readerThread!!.looper)
+
+                val projectionManager =
+                    context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+
+                // Android 14+ requires a callback to be registered before capture starts.
+                mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        Log.i(TAG, "MediaProjection stopped")
+                        mediaProjection = null
+                    }
+                }, readerHandler)
+            } else {
+                Log.i(TAG, "Reusing existing MediaProjection")
+                if (readerHandler == null) {
+                    readerThread = HandlerThread("GhostImageReader").also { it.start() }
+                    readerHandler = Handler(readerThread!!.looper)
+                }
+            }
 
             imageReader = ImageReader.newInstance(
                 width,
@@ -181,12 +192,20 @@ class GhostEngine(private val context: Context) {
         virtualDisplay = null
         activeDisplayId.set(-1)
         cleanupReader()
+        // NOTE: mediaProjection is intentionally NOT stopped here. Android forbids
+        // re-using a projection token, so we keep it alive and reuse the same
+        // instance for the next ghost session. It is only released if the whole
+        // engine is torn down.
+        Log.i(TAG, "Ghost Display released (projection kept alive)")
+    }
+
+    fun stopProjection() {
         try {
             mediaProjection?.stop()
         } catch (_: Exception) {
         }
         mediaProjection = null
-        Log.i(TAG, "Ghost Display released")
+        Log.i(TAG, "MediaProjection stopped")
     }
 
     fun isGhostModeActive(): Boolean = virtualDisplay != null
