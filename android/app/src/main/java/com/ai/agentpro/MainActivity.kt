@@ -94,12 +94,59 @@ class MainActivity : Activity() {
             }
         }
 
+        val ghostButton = Button(this).apply {
+            text = "تفعيل وضع الشبح (Ghost Mode)"
+            setOnClickListener {
+                val projectionManager =
+                    getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                        as? android.media.projection.MediaProjectionManager
+                if (projectionManager == null) {
+                    status.text = "MediaProjection غير مدعوم"
+                    return@setOnClickListener
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(
+                    projectionManager.createScreenCaptureIntent(),
+                    GHOST_PROJECTION_REQUEST
+                )
+            }
+        }
+
         root.addView(title)
         root.addView(status)
         root.addView(accessibilityButton)
         root.addView(copyTokenButton)
         root.addView(shizukuButton)
+        root.addView(ghostButton)
 
         setContentView(root)
     }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == GHOST_PROJECTION_REQUEST) {
+            if (resultCode == RESULT_OK && data != null) {
+                // Hand the projection token to the ghost engine
+                GhostProjectionHolder.resultCode = resultCode
+                GhostProjectionHolder.data = data
+                status.text = "تم منح إذن الشبح ✅ اضغط مرة أخرى لتفعيله"
+            } else {
+                status.text = "تم رفض إذن الشبح"
+            }
+        }
+    }
+
+    companion object {
+        private const val GHOST_PROJECTION_REQUEST = 2001
+    }
+}
+
+/**
+ * Holds the MediaProjection consent result until the bridge asks for it.
+ */
+object GhostProjectionHolder {
+    @Volatile var resultCode: Int = android.app.Activity.RESULT_CANCELED
+    @Volatile var data: Intent? = null
 }

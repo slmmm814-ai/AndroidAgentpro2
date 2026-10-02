@@ -1,16 +1,20 @@
 package com.ai.agentpro
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.ResultReceiver
 import android.util.Log
-import android.view.Display
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -36,21 +40,42 @@ class GhostEngine(private val context: Context) {
     private var imageReader: ImageReader? = null
     private var readerThread: HandlerThread? = null
     private var readerHandler: Handler? = null
+    private var mediaProjection: MediaProjection? = null
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val activeDisplayId = AtomicInteger(-1)
 
-    fun createGhostDisplay(width: Int = DEFAULT_WIDTH, height: Int = DEFAULT_HEIGHT, dpi: Int = DEFAULT_DPI): Int {
+    /**
+     * Create the ghost display using a MediaProjection token so that external
+     * apps are allowed to render onto the virtual display.
+     *
+     * [resultCode]/[data] come from the MediaProjection consent dialog. If the
+     * projection token is missing the display cannot host other apps, so this
+     * returns -1.
+     */
+    fun createGhostDisplay(
+        width: Int = DEFAULT_WIDTH,
+        height: Int = DEFAULT_HEIGHT,
+        dpi: Int = DEFAULT_DPI,
+        resultCode: Int = Activity.RESULT_CANCELED,
+        data: Intent? = null
+    ): Int {
         if (virtualDisplay != null) {
             return activeDisplayId.get()
         }
 
         try {
-            // Background thread for ImageReader callbacks
+            if (data == null || resultCode != Activity.RESULT_OK) {
+                Log.e(TAG, "MediaProjection consent missing; cannot host other apps")
+                return -1
+            }
+
+            val projectionManager =
+                context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+
             readerThread = HandlerThread("GhostImageReader").also { it.start() }
             readerHandler = Handler(readerThread!!.looper)
 
-            // ImageReader provides the surface so the virtual display actually renders,
-            // which lets us capture screenshots and keeps windows alive.
             imageReader = ImageReader.newInstance(
                 width,
                 height,
@@ -59,27 +84,25 @@ class GhostEngine(private val context: Context) {
             )
 
             imageReader?.setOnImageAvailableListener({ reader ->
-                // Acquire and discard to keep the buffer flowing
                 try {
-                    val img = reader.acquireLatestImage()
-                    img?.close()
+                    reader.acquireLatestImage()?.close()
                 } catch (_: Exception) {
                 }
             }, readerHandler)
 
             val surface = imageReader!!.surface
 
-            // Android requires OWN_CONTENT_ONLY for non-screen-sharing virtual displays
-            // created without MediaProjection. Combined with PUBLIC this still lets the
-            // display host other apps' windows once they are launched onto it.
-            virtualDisplay = displayManager.createVirtualDisplay(
+            // MediaProjection token allows a PUBLIC display with other apps' content.
+            virtualDisplay = mediaProjection!!.createVirtualDisplay(
                 "GhostDisplay",
                 width,
                 height,
                 dpi,
-                surface,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                surface,
+                null,
+                null
             )
 
             val displayId = virtualDisplay?.display?.displayId ?: -1
@@ -115,7 +138,6 @@ class GhostEngine(private val context: Context) {
                 )
                 bitmap.copyPixelsFromBuffer(buffer)
 
-                // Crop padding if present
                 val cropped = if (rowPadding > 0) {
                     Bitmap.createBitmap(bitmap, 0, 0, it.width, it.height)
                 } else {
@@ -155,6 +177,11 @@ class GhostEngine(private val context: Context) {
         virtualDisplay = null
         activeDisplayId.set(-1)
         cleanupReader()
+        try {
+            mediaProjection?.stop()
+        } catch (_: Exception) {
+        }
+        mediaProjection = null
         Log.i(TAG, "Ghost Display released")
     }
 

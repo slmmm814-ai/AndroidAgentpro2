@@ -724,8 +724,17 @@ class BridgeServer(
 
     private fun executeGhostStart(request: BridgeProtocol.BridgeRequest): CommandResponse {
         val engine = GhostEngine.getInstance(context)
-        val displayId = engine.createGhostDisplay()
-        
+
+        // If a projection token was already captured via the UI button, reuse it.
+        val projectionData = GhostProjectionHolder.data
+        val projectionResult = GhostProjectionHolder.resultCode
+
+        val displayId = if (projectionData != null && projectionResult == android.app.Activity.RESULT_OK) {
+            engine.createGhostDisplay(resultCode = projectionResult, data = projectionData)
+        } else {
+            engine.createGhostDisplay()
+        }
+
         return if (displayId != -1) {
             CommandResponse.success(
                 BridgeProtocol.success(
@@ -734,7 +743,14 @@ class BridgeServer(
                 )
             )
         } else {
-            CommandResponse.failure(500, BridgeProtocol.error(request.requestId, "GHOST_INIT_FAILED", "Could not create virtual display"))
+            CommandResponse.failure(
+                500,
+                BridgeProtocol.error(
+                    request.requestId,
+                    "GHOST_INIT_FAILED",
+                    "Could not create virtual display. Grant Ghost Mode permission in the app first."
+                )
+            )
         }
     }
 
