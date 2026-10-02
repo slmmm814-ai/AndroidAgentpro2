@@ -148,6 +148,13 @@ class BridgeClientNewActionsTests(unittest.TestCase):
         self.client.erase_text()
         self.assertEqual(self.client.last_request["command"], "erase_text")
 
+    def test_take_photo_sends_correct_command(self) -> None:
+        resp = self.client.take_photo("front")
+        self.assertIsInstance(resp, BridgeResponse)
+        self.assertTrue(resp.ok)
+        self.assertEqual(self.client.last_request["command"], "take_photo")
+        self.assertEqual(self.client.last_request["args"]["facing"], "front")
+
 
 class BridgeClientValidationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -176,6 +183,10 @@ class BridgeClientValidationTests(unittest.TestCase):
     def test_launch_app_empty_rejected(self) -> None:
         with self.assertRaises(BridgeConfigurationError):
             self.client.launch_app("")
+
+    def test_take_photo_bad_facing_rejected(self) -> None:
+        with self.assertRaises(BridgeConfigurationError):
+            self.client.take_photo("invalid_facing")
 
 
 if __name__ == "__main__":

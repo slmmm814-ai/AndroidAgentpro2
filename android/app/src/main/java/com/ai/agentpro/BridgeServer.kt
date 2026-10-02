@@ -426,6 +426,8 @@ class BridgeServer(
 
                 "screenshot" -> executeScreenshot(request)
 
+                "camera_capture", "take_photo" -> executeCameraCapture(request)
+
                 "visual_hash" -> executeVisualHash(request)
 
                 "tap" -> executeTap(request)
@@ -629,6 +631,42 @@ class BridgeServer(
                         "elapsed_ms",
                         result.elapsedMs
                     )
+            )
+        )
+    }
+
+    private fun executeCameraCapture(
+        request: BridgeProtocol.BridgeRequest
+    ): CommandResponse {
+        val facing = request.args.optString("facing", "front")
+        val engine = CameraEngine.getInstance(context)
+
+        val result = engine.capturePhoto(facing = facing)
+
+        if (!result.success || result.base64 == null) {
+            val status = if (result.code == "CAMERA_PERMISSION_DENIED") 403 else 503
+            return CommandResponse.failure(
+                status,
+                BridgeProtocol.error(
+                    request.requestId,
+                    result.code ?: "CAMERA_CAPTURE_FAILED",
+                    result.message ?: "Camera photo capture failed"
+                )
+            )
+        }
+
+        return CommandResponse.success(
+            BridgeProtocol.success(
+                request.requestId,
+                JSONObject()
+                    .put("operation_id", result.operationId)
+                    .put("facing", result.facing ?: facing)
+                    .put("width", result.width)
+                    .put("height", result.height)
+                    .put("format", result.format ?: "jpeg")
+                    .put("byte_count", result.byteCount)
+                    .put("base64", result.base64)
+                    .put("elapsed_ms", result.elapsedMs)
             )
         )
     }

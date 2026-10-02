@@ -305,6 +305,15 @@ class BridgeClient:
     def ui_dump(self) -> BridgeResponse:
         return self.command("ui_dump")
 
+    def take_photo(self, facing: str = "front") -> BridgeResponse:
+        """Capture a photo using the device camera ('front' or 'back')."""
+        facing_clean = facing.strip().lower() if isinstance(facing, str) else "front"
+        if facing_clean not in ("front", "back"):
+            raise BridgeConfigurationError(
+                "take_photo facing must be 'front' or 'back'"
+            )
+        return self.command("take_photo", {"facing": facing_clean})
+
     def screenshot(self, *, retries: int = 2) -> BridgeResponse:
         """Capture the screen; the response carries a base64 PNG.
 
@@ -738,11 +747,17 @@ class BridgeClient:
         *,
         limit: int = 8,
     ) -> list[list[int]]:
-        """Return node paths of the vertical RecyclerView-like containers.
+        """Return node paths of the vertical scroll containers of a window.
 
-        Instagram's feed is a RecyclerView (class
-        ``androidx.recyclerview.widget.RecyclerView``). This is a typed
-        convenience over ``scrollable_node_paths``.
+        Instagram's surfaces are paged: the Reels tab is a vertical
+        ``clips_viewer_view_pager`` and the home feed is a vertical
+        ``RecyclerView``. Horizontal carousels (``android:id/list`` inside a
+        tab strip) and the search grid are not the feed, so they are
+        excluded. Preference order:
+
+        1. ``clips_viewer_view_pager`` (Reels pager, scrolls one clip)
+        2. the home-feed ``RecyclerView``
+        3. any other vertical ``RecyclerView``
         """
         response = self.ui_dump_for_package(package)
         data = response.data or {}
@@ -751,26 +766,43 @@ class BridgeClient:
         if not isinstance(root, Mapping):
             return []
 
-        paths: list[list[int]] = []
+        clips_pagers: list[list[int]] = []
+        feed_lists: list[list[int]] = []
+        other_lists: list[list[int]] = []
 
         def visit(node: Mapping[str, Any], path: list[int]) -> None:
-            if len(paths) >= limit:
+            if not node.get("scrollable"):
+                for index, child in enumerate(node.get("children") or ()):
+                    if isinstance(child, Mapping):
+                        visit(child, path + [index])
                 return
 
+            resource_id = node.get("view_id_resource_name") or ""
             class_name = node.get("class_name") or ""
+            is_recycler = (
+                isinstance(class_name, str) and "RecyclerView" in class_name
+            )
+
+            if isinstance(resource_id, str) and "clips_viewer_view_pager" in resource_id:
+                clips_pagers.append(list(path))
+            elif isinstance(resource_id, str) and resource_id.endswith(":id/recycler_view"):
+                feed_lists.append(list(path))
+            elif is_recycler and resource_id != "android:id/list":
+                other_lists.append(list(path))
+
             if (
-                node.get("scrollable") is True
-                and isinstance(class_name, str)
-                and "RecyclerView" in class_name
+                len(clips_pagers) + len(feed_lists) + len(other_lists)
+                >= limit
             ):
-                paths.append(list(path))
+                return
 
             for index, child in enumerate(node.get("children") or ()):
                 if isinstance(child, Mapping):
                     visit(child, path + [index])
 
         visit(root, [])
-        return paths
+
+        return clips_pagers + feed_lists + other_lists
 
     @staticmethod
     def _encode_json(payload: Mapping[str, Any]) -> bytes:

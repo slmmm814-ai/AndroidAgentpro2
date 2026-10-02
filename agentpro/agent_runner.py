@@ -88,6 +88,19 @@ class RecordingBridgeClient:
             }
         )
 
+    def take_photo(self, facing: str = "front") -> FakeResponse:
+        self.calls.append(("take_photo", {"facing": facing}))
+        return FakeResponse(
+            data={
+                "base64": self._screenshot,
+                "facing": facing,
+                "width": 1280,
+                "height": 720,
+                "format": "jpeg",
+                "byte_count": len(self._screenshot) if self._screenshot else 0,
+            }
+        )
+
     def tap(self, x: float, y: float) -> FakeResponse:
         return self._record("tap", {"x": x, "y": y})
 

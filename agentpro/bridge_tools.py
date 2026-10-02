@@ -1003,6 +1003,33 @@ class _ScreenshotTool(Tool):
         return ActionType.SCREENSHOT
 
 
+class _TakePhotoTool(Tool):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="take_photo",
+                description="Capture a photo using the phone camera ('front' or 'back')",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "facing": {
+                            "type": "string",
+                            "enum": ["front", "back"],
+                            "description": "Camera to use ('front' or 'back'). Default is 'front'.",
+                        }
+                    },
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        facing = str(args.get("facing", "front")) if isinstance(args, Mapping) else "front"
+        return ToolResult(success=True, data=_resp_data(ctx.client.take_photo(facing=facing)))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.TAKE_PHOTO
+
+
 class _WaitTool(Tool):
     def __init__(self) -> None:
         super().__init__(
@@ -1239,6 +1266,7 @@ def build_default_registry(
     registry.register(_GetWindowTool())
     registry.register(_DumpUiTool())
     registry.register(_ScreenshotTool())
+    registry.register(_TakePhotoTool())
     registry.register(_WaitTool())
     registry.register(_WaitForTextTool())
     registry.register(_WaitForScreenStableTool())

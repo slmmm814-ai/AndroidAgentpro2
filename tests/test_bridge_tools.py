@@ -43,6 +43,7 @@ class RegistryTests(unittest.TestCase):
             "get_window_info",
             "dump_ui",
             "screenshot",
+            "take_photo",
             "wait",
             "wait_for_text",
             "wait_for_screen_stable",
@@ -72,6 +73,7 @@ class RegistryTests(unittest.TestCase):
             "swipe": ActionType.SWIPE,
             "open_url": ActionType.OPEN_URL,
             "get_window_info": ActionType.GET_WINDOW,
+            "take_photo": ActionType.TAKE_PHOTO,
         }
         for name, expected in mappings.items():
             self.assertEqual(registry.get(name).to_action_type(), expected)

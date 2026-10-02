@@ -38,6 +38,7 @@ class ActionType(str, Enum):
     CLEAR_TEXT = "clear_text"
     ERASE_TEXT = "erase_text"
     GET_WINDOW = "get_window"
+    TAKE_PHOTO = "take_photo"
     MCP_CALL = "mcp_call"
 
 
