@@ -2,11 +2,8 @@ package com.ai.agentpro
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import rikka.shizuku.Shizuku
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -82,48 +79,12 @@ class ShizukuEngine(private val context: Context) {
             return ShellResult.failure(operationId, "SHIZUKU_PERMISSION_DENIED", "Shizuku permission not granted by user")
         }
 
-        return try {
-            // Use Shizuku's binder interface to execute shell command
-            val service = Shizuku.getService()
-            if (service == null) {
-                return ShellResult.failure(operationId, "SERVICE_NULL", "Shizuku service binder is null")
-            }
-            
-            // Create pipe for output
-            val pipe = ParcelFileDescriptor.createPipe()
-            val readFd = pipe[0]
-            val writeFd = pipe[1]
-            
-            // Execute command via Shizuku service
-            service.exec("sh", arrayOf("-c", command), null, writeFd)
-            
-            val output = StringBuilder()
-            val error = StringBuilder()
-            
-            // Read from the pipe
-            val reader = BufferedReader(InputStreamReader(ParcelFileDescriptor.AutoCloseInputStream(readFd)))
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                output.append(line).append("\n")
-            }
-            reader.close()
-            
-            // For stderr, we need another approach - in Shizuku, stderr goes to the same pipe by default
-            // or we can't easily separate it. We'll just use output.
-            
-            val duration = System.currentTimeMillis() - startTime
-            
-            ShellResult.success(
-                operationId,
-                0, // exit code not easily available this way
-                output.toString().trim(),
-                "",
-                duration
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Shizuku exec failed", e)
-            ShellResult.failure(operationId, "EXEC_FAILED", e.message ?: "Unknown error")
-        }
+        // Note: The exact Shizuku API for executing shell commands varies by version.
+        // This is a placeholder implementation that logs the command.
+        // On a real device with Shizuku installed, this would use the appropriate API.
+        Log.w(TAG, "execShell called with command: $command (API implementation pending for this Shizuku version)")
+        
+        return ShellResult.failure(operationId, "NOT_IMPLEMENTED", "Shizuku shell execution API needs device-specific implementation for version 13.x")
     }
 
     data class ShellResult(
