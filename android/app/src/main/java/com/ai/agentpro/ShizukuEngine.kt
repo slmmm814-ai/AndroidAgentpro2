@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
 import rikka.shizuku.Shizuku
-import rikka.shizuku.ShizukuRemoteProcess
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.concurrent.CountDownLatch
@@ -83,7 +82,8 @@ class ShizukuEngine(private val context: Context) {
         }
 
         return try {
-            val process = Shizuku.newProcess(arrayOf("sh", "-c", command), null, null)
+            // Use Shizuku's shell API for executing commands
+            val process = Shizuku.shell(arrayOf("sh", "-c", command))
             val output = StringBuilder()
             val error = StringBuilder()
             
