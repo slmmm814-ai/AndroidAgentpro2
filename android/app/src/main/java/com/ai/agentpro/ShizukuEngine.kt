@@ -30,6 +30,7 @@ class ShizukuEngine(private val context: Context) {
         return try {
             Shizuku.pingBinder()
         } catch (e: Exception) {
+            Log.w(TAG, "pingBinder failed: ${e.message}")
             false
         }
     }
