@@ -42,6 +42,8 @@ class ActionType(str, Enum):
     SHIZUKU_SHELL = "shizuku_shell"
     GHOST_START = "ghost_start"
     GHOST_STOP = "ghost_stop"
+    GHOST_SCREENSHOT = "ghost_screenshot"
+    LAUNCH_APP = "launch_app"
     LIST_PACKAGES = "list_packages"
     APP_INFO = "app_info"
     KILL_APP = "kill_app"

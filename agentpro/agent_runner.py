@@ -117,6 +117,22 @@ class RecordingBridgeClient:
         self.calls.append(("ghost_stop", {}))
         return FakeResponse(data={"status": "STOPPED"})
 
+    def ghost_screenshot(self, *, quality: int = 80) -> FakeResponse:
+        self.calls.append(("ghost_screenshot", {"quality": quality}))
+        return FakeResponse(
+            data={"base64": "mock_ghost_frame", "byte_count": 12, "display_id": 2}
+        )
+
+    def take_photo(self, facing: str = "back") -> FakeResponse:
+        self.calls.append(("take_photo", {"facing": facing}))
+        return FakeResponse(
+            data={"base64": "mock_photo", "byte_count": 11, "width": 1920, "height": 1080}
+        )
+
+    def launch_app(self, package: str) -> FakeResponse:
+        self.calls.append(("launch_app", {"package": package}))
+        return FakeResponse(data={"dispatched": True, "package": package})
+
     def tap(self, x: float, y: float) -> FakeResponse:
         return self._record("tap", {"x": x, "y": y})
 
@@ -491,6 +507,14 @@ class BridgeActionExecutor:
 
             if at is ActionType.GHOST_STOP:
                 resp = self._client.ghost_stop()
+                return self._ok(resp)
+
+            if at is ActionType.GHOST_SCREENSHOT:
+                resp = self._client.ghost_screenshot(quality=int(args.get("quality", 80)))
+                return self._ok(resp)
+
+            if at is ActionType.LAUNCH_APP:
+                resp = self._client.launch_app(args.get("package", ""))
                 return self._ok(resp)
 
             if at is ActionType.LIST_WINDOWS:

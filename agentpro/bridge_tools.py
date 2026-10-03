@@ -1091,6 +1091,39 @@ class _GhostStopTool(Tool):
         return ActionType.GHOST_STOP
 
 
+class _GhostScreenshotTool(Tool):
+    """Capture a frame from the ghost (virtual) display."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            ToolSpec(
+                name="ghost_screenshot",
+                description=(
+                    "Capture a JPEG screenshot of the ghost (hidden virtual) display. "
+                    "The image is returned as base64 in the data field."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {"quality": {"type": "integer", "default": 80}},
+                },
+            )
+        )
+
+    def execute(self, ctx: ToolContext, args: Mapping[str, Any]) -> ToolResult:
+        quality = int(args.get("quality", 80))
+        resp = ctx.client.ghost_screenshot(quality=quality)
+        if not resp.ok:
+            return ToolResult(
+                success=False,
+                error_code=resp.error_code or "GHOST_CAPTURE_FAILED",
+                error_message=resp.error_message or "Could not capture ghost display",
+            )
+        return ToolResult(success=True, data=_resp_data(resp))
+
+    def to_action_type(self) -> ActionType:
+        return ActionType.GHOST_SCREENSHOT
+
+
 # ===== System Info Tools =====
 
 class _GetBatteryTool(Tool):
@@ -1408,6 +1441,7 @@ class _ListFilesTool(Tool):
 
     def to_action_type(self) -> ActionType:
         return ActionType.LIST_FILES
+
 
 
 class _ListWindowsTool(Tool):
@@ -1762,6 +1796,7 @@ def build_default_registry(
     registry.register(_ShizukuShellTool())
     registry.register(_GhostStartTool())
     registry.register(_GhostStopTool())
+    registry.register(_GhostScreenshotTool())
     registry.register(_GetBatteryTool())
     registry.register(_GetLocationTool())
     registry.register(_GetNetworkInfoTool())
