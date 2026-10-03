@@ -80,8 +80,23 @@ class ShizukuEngine(private val context: Context) {
         }
 
         return try {
-            // Shizuku 13.x: Shizuku.newProcess() runs a process as shell (uid 2000).
-            val process = Shizuku.newProcess(arrayOf("sh", "-c", command), null, null)
+            // Shizuku.newProcess() is private in the public API, so call it via
+            // reflection. It returns a ShizukuRemoteProcess which extends
+            // android.os.RemoteProcess, running as shell (uid 2000).
+            val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            )
+            newProcessMethod.isAccessible = true
+
+            val process = newProcessMethod.invoke(
+                null,
+                arrayOf("sh", "-c", command),
+                null,
+                null
+            ) as android.os.RemoteProcess
 
             val stdout = process.inputStream.bufferedReader().use { it.readText() }
             val stderr = process.errorStream.bufferedReader().use { it.readText() }
