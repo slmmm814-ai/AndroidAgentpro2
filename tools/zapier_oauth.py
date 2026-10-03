@@ -71,7 +71,7 @@ def step_finish(redirect_url: str) -> int:
         supports_device_flow=False,
     )
     try:
-        token=[REDACTED], pkce["verifier"], pkce["redirect_uri"])
+        token=[REDACTED](code, pkce["verifier"], pkce["redirect_uri"])
     except OAuthError as exc:
         print(f"token exchange failed: {exc}", file=sys.stderr)
         return 1

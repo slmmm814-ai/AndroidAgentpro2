@@ -63,9 +63,17 @@ class GhostEngine(private val context: Context) {
             return activeDisplayId.get()
         }
 
+        // Reuse the existing virtual display if we already have one.
+        // Android forbids creating multiple displays on the same MediaProjection.
+        if (virtualDisplay != null) {
+            val existingId = activeDisplayId.get()
+            if (existingId != -1) {
+                Log.i(TAG, "Reusing existing ghost display: ID=$existingId")
+                return existingId
+            }
+        }
+
         try {
-            // Reuse an already-live MediaProjection if we have one; Android forbids
-            // re-using the consent Intent, so we must hold on to the instance.
             if (mediaProjection == null) {
                 if (data == null || resultCode != Activity.RESULT_OK) {
                     Log.e(TAG, "MediaProjection consent missing; cannot host other apps")
@@ -188,18 +196,22 @@ class GhostEngine(private val context: Context) {
     }
 
     fun releaseGhostDisplay() {
+        // Keep the virtual display and projection alive; just mark inactive.
+        // Android forbids re-creating displays on the same MediaProjection instance,
+        // so the display is created once and reused for every ghost session.
+        activeDisplayId.set(virtualDisplay?.display?.displayId ?: -1)
+        Log.i(TAG, "Ghost display hidden (kept alive)")
+    }
+
+    fun resumeGhostDisplay(): Int {
+        return activeDisplayId.get()
+    }
+
+    fun stopProjection() {
         virtualDisplay?.release()
         virtualDisplay = null
         activeDisplayId.set(-1)
         cleanupReader()
-        // NOTE: mediaProjection is intentionally NOT stopped here. Android forbids
-        // re-using a projection token, so we keep it alive and reuse the same
-        // instance for the next ghost session. It is only released if the whole
-        // engine is torn down.
-        Log.i(TAG, "Ghost Display released (projection kept alive)")
-    }
-
-    fun stopProjection() {
         try {
             mediaProjection?.stop()
         } catch (_: Exception) {
