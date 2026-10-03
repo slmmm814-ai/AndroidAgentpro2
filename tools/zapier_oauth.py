@@ -20,12 +20,15 @@ from agentpro.mcp_oauth import MCPOAuthClient, OAuthError, save_token  # noqa: E
 
 RESOURCE = "https://mcp.zapier.com/mcp"
 STATE_FILE = os.path.expanduser("~/.agentpro/zapier_pkce.json")
-REDIRECT_URI = "http://127.0.0.1:8765/callback"
+# RFC 8252 loopback: many providers accept "localhost" but reject a literal
+# 127.0.0.1 host in the redirect_uri. We paste the code manually, so the URI
+# never needs to be reachable -- it only has to be accepted by the server.
+REDIRECT_URI = "http://localhost:8765/callback"
 
 
 def step_start() -> int:
     client = MCPOAuthClient(RESOURCE)
-    client.register()  # cache the dynamic client id
+    client.register(redirect_uris=[REDIRECT_URI])  # register with the SAME uri we authorize with
     url, state, verifier = client.begin_authorization(REDIRECT_URI)
     with open(STATE_FILE, "w") as fh:
         json.dump(
@@ -68,7 +71,7 @@ def step_finish(redirect_url: str) -> int:
         client_id=pkce["client_id"],
         client_secret=None,
         redirect_uris=(pkce["redirect_uri"],),
-        supports_device_flow=False,
+        grant_types=("authorization_code", "refresh_token"),
     )
     try:
         token=[REDACTED](code, pkce["verifier"], pkce["redirect_uri"])

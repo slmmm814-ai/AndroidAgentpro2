@@ -70,21 +70,31 @@ class ShizukuEngine(private val context: Context) {
     fun execShell(command: String): ShellResult {
         val operationId = operationCounter.incrementAndGet()
         val startTime = System.currentTimeMillis()
-        
+
         if (!isServiceAvailable()) {
             return ShellResult.failure(operationId, "SHIZUKU_NOT_RUNNING", "Shizuku service is not running on the device")
         }
-        
+
         if (!hasPermission()) {
             return ShellResult.failure(operationId, "SHIZUKU_PERMISSION_DENIED", "Shizuku permission not granted by user")
         }
 
-        // Note: The exact Shizuku API for executing shell commands varies by version.
-        // This is a placeholder implementation that logs the command.
-        // On a real device with Shizuku installed, this would use the appropriate API.
-        Log.w(TAG, "execShell called with command: $command (API implementation pending for this Shizuku version)")
-        
-        return ShellResult.failure(operationId, "NOT_IMPLEMENTED", "Shizuku shell execution API needs device-specific implementation for version 13.x")
+        return try {
+            // Shizuku 13.x: Shizuku.newProcess() runs a process as shell (uid 2000).
+            val process = Shizuku.newProcess(arrayOf("sh", "-c", command), null, null)
+
+            val stdout = process.inputStream.bufferedReader().use { it.readText() }
+            val stderr = process.errorStream.bufferedReader().use { it.readText() }
+            val exitCode = process.waitFor()
+
+            val elapsed = System.currentTimeMillis() - startTime
+            Log.i(TAG, "execShell [$operationId] exit=$exitCode ${elapsed}ms: $command")
+
+            ShellResult.success(operationId, exitCode, stdout, stderr, elapsed)
+        } catch (e: Exception) {
+            Log.e(TAG, "execShell [$operationId] failed", e)
+            ShellResult.failure(operationId, "EXEC_FAILED", e.message ?: "Unknown error")
+        }
     }
 
     data class ShellResult(
