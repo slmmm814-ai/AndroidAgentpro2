@@ -96,7 +96,7 @@ class ShizukuEngine(private val context: Context) {
                 arrayOf("sh", "-c", command),
                 null,
                 null
-            ) as android.os.RemoteProcess
+            ) as rikka.shizuku.ShizukuRemoteProcess
 
             val stdout = process.inputStream.bufferedReader().use { it.readText() }
             val stderr = process.errorStream.bufferedReader().use { it.readText() }
